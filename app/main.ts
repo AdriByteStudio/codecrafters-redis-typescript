@@ -249,7 +249,10 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
 
             const [startMs, startSeq] =
                startArg === "-" ? [0, 0] : parseRangeId(startArg, 0);
-            const [endMs, endSeq] = parseRangeId(endArg, Number.MAX_SAFE_INTEGER);
+            const [endMs, endSeq] =
+               endArg === "+"
+                  ? [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]
+                  : parseRangeId(endArg, Number.MAX_SAFE_INTEGER);
 
             const stream = streams.get(key) ?? [];
             const entries = stream.filter((entry) => {
