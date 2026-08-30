@@ -51,7 +51,21 @@ function bulkString(value: Buffer): Buffer {
 }
 
 // In-memory key-value store, shared across all connections.
-const store = new Map<string, Buffer>();
+// Each entry holds the value and an optional expiry timestamp (ms since epoch).
+const store = new Map<string, { value: Buffer; expiresAt: number | null }>();
+
+// Returns the value for a key, or undefined if the key is missing or expired.
+function getValue(key: string): Buffer | undefined {
+   const entry = store.get(key);
+   if (entry === undefined) {
+      return undefined;
+   }
+   if (entry.expiresAt !== null && Date.now() >= entry.expiresAt) {
+      store.delete(key);
+      return undefined;
+   }
+   return entry.value;
+}
 
 const server: net.Server = net.createServer((connection: net.Socket) => {
    let buffer = Buffer.alloc(0);
@@ -73,10 +87,25 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          } else if (command === "echo") {
             connection.write(bulkString(parsed.args[0]));
          } else if (command === "set") {
-            store.set(parsed.args[0].toString(), parsed.args[1]);
+            const key = parsed.args[0].toString();
+            const value = parsed.args[1];
+
+            // Parse optional expiry options: EX <seconds> or PX <milliseconds>.
+            let expiresAt: number | null = null;
+            for (let i = 2; i + 1 < parsed.args.length; i += 2) {
+               const option = parsed.args[i].toString().toLowerCase();
+               const amount = parseInt(parsed.args[i + 1].toString(), 10);
+               if (option === "ex") {
+                  expiresAt = Date.now() + amount * 1000;
+               } else if (option === "px") {
+                  expiresAt = Date.now() + amount;
+               }
+            }
+
+            store.set(key, { value, expiresAt });
             connection.write("+OK\r\n");
          } else if (command === "get") {
-            const value = store.get(parsed.args[0].toString());
+            const value = getValue(parsed.args[0].toString());
             connection.write(value === undefined ? "$-1\r\n" : bulkString(value));
          }
       }
