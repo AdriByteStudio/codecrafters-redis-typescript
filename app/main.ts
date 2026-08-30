@@ -57,6 +57,14 @@ const store = new Map<string, { value: Buffer; expiresAt: number | null }>();
 // In-memory list store, shared across all connections.
 const lists = new Map<string, Buffer[]>();
 
+// In-memory stream store, shared across all connections. Each entry holds its
+// ID and the field-value pairs (as alternating Buffers).
+interface StreamEntry {
+   id: string;
+   fields: Buffer[];
+}
+const streams = new Map<string, StreamEntry[]>();
+
 // Clients blocked on BLPOP, keyed by list name. Each queue is FIFO so the
 // client that has been waiting the longest is served first. Each entry also
 // holds the timeout timer so it can be cleared when the client is served.
@@ -157,9 +165,19 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
                connection.write("+string\r\n");
             } else if (lists.has(key)) {
                connection.write("+list\r\n");
+            } else if (streams.has(key)) {
+               connection.write("+stream\r\n");
             } else {
                connection.write("+none\r\n");
             }
+         } else if (command === "xadd") {
+            const key = parsed.args[0].toString();
+            const id = parsed.args[1].toString();
+            const fields = parsed.args.slice(2);
+            const stream = streams.get(key) ?? [];
+            stream.push({ id, fields });
+            streams.set(key, stream);
+            connection.write(bulkString(Buffer.from(id)));
          } else if (command === "rpush") {
             const key = parsed.args[0].toString();
             const list = lists.get(key) ?? [];
