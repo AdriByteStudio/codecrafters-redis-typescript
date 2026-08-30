@@ -261,6 +261,12 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          } else if (command === "get") {
             const value = getValue(parsed.args[0].toString());
             connection.write(value === undefined ? "$-1\r\n" : bulkString(value));
+         } else if (command === "incr") {
+            const key = parsed.args[0].toString();
+            const value = getValue(key)!;
+            const incremented = parseInt(value.toString(), 10) + 1;
+            store.set(key, { value: Buffer.from(incremented.toString()), expiresAt: null });
+            connection.write(`:${incremented}\r\n`);
          } else if (command === "type") {
             const key = parsed.args[0].toString();
             if (getValue(key) !== undefined) {
