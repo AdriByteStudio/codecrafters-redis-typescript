@@ -172,40 +172,54 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
          } else if (command === "xadd") {
             const key = parsed.args[0].toString();
-            const id = parsed.args[1].toString();
+            const rawId = parsed.args[1].toString();
             const fields = parsed.args.slice(2);
 
-            const [msStr, seqStr] = id.split("-");
+            const [msStr, seqStr] = rawId.split("-");
             const ms = parseInt(msStr, 10);
-            const seq = parseInt(seqStr, 10);
+            const stream = streams.get(key);
+            const last = stream?.[stream.length - 1];
+
+            // Resolve a partially or fully auto-generated sequence number
+            // (e.g. "5-*") into a concrete numeric sequence.
+            let seq: number;
+            if (seqStr === "*") {
+               if (last !== undefined) {
+                  const [lastMsStr, lastSeqStr] = last.id.split("-");
+                  const lastMs = parseInt(lastMsStr, 10);
+                  const lastSeq = parseInt(lastSeqStr, 10);
+                  seq = lastMs === ms ? lastSeq + 1 : 0;
+               } else {
+                  seq = ms === 0 ? 1 : 0;
+               }
+            } else {
+               seq = parseInt(seqStr, 10);
+            }
+            const id = `${ms}-${seq}`;
 
             // 0-0 is always invalid, regardless of stream state.
             if (ms === 0 && seq === 0) {
                connection.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
+            } else if (last === undefined) {
+               // Stream is empty (0-0 already rejected above).
+               const newStream = stream ?? [];
+               newStream.push({ id, fields });
+               streams.set(key, newStream);
+               connection.write(bulkString(Buffer.from(id)));
             } else {
-               const stream = streams.get(key);
-               const last = stream?.[stream.length - 1];
-               if (last === undefined) {
-                  // Stream is empty (0-0 already rejected above).
+               const [lastMsStr, lastSeqStr] = last.id.split("-");
+               const lastMs = parseInt(lastMsStr, 10);
+               const lastSeq = parseInt(lastSeqStr, 10);
+
+               if (ms > lastMs || (ms === lastMs && seq > lastSeq)) {
                   const newStream = stream ?? [];
                   newStream.push({ id, fields });
                   streams.set(key, newStream);
                   connection.write(bulkString(Buffer.from(id)));
                } else {
-                  const [lastMsStr, lastSeqStr] = last.id.split("-");
-                  const lastMs = parseInt(lastMsStr, 10);
-                  const lastSeq = parseInt(lastSeqStr, 10);
-
-                  if (ms > lastMs || (ms === lastMs && seq > lastSeq)) {
-                     const newStream = stream ?? [];
-                     newStream.push({ id, fields });
-                     streams.set(key, newStream);
-                     connection.write(bulkString(Buffer.from(id)));
-                  } else {
-                     connection.write(
-                        "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
-                     );
-                  }
+                  connection.write(
+                     "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+                  );
                }
             }
          } else if (command === "rpush") {
