@@ -242,6 +242,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             connection.write(bulkString(parsed.args[0]));
          } else if (command === "multi") {
             connection.write("+OK\r\n");
+         } else if (command === "exec") {
+            connection.write("-ERR EXEC without MULTI\r\n");
          } else if (command === "set") {
             const key = parsed.args[0].toString();
             const value = parsed.args[1];
