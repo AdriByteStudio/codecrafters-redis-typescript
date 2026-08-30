@@ -262,6 +262,14 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             send(Buffer.concat([Buffer.from(`*${queued.length}\r\n`), ...results]));
          }
+      } else if (command === "discard") {
+         if (!inTransaction) {
+            send("-ERR DISCARD without MULTI\r\n");
+         } else {
+            inTransaction = false;
+            queuedCommands.length = 0;
+            send("+OK\r\n");
+         }
       } else if (command === "set") {
          const key = args[0].toString();
          const value = args[1];
@@ -581,7 +589,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          buffer = buffer.subarray(parsed.consumed);
          const command = parsed.command.toLowerCase();
 
-         if (inTransaction && command !== "multi" && command !== "exec") {
+         if (inTransaction && command !== "multi" && command !== "exec" && command !== "discard") {
             queuedCommands.push({ command, args: parsed.args });
             connection.write("+QUEUED\r\n");
             continue;
