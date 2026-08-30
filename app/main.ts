@@ -126,6 +126,9 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             lists.set(key, list);
             connection.write(`:${list.length}\r\n`);
+         } else if (command === "llen") {
+            const list = lists.get(parsed.args[0].toString());
+            connection.write(`:${list?.length ?? 0}\r\n`);
          } else if (command === "lrange") {
             const key = parsed.args[0].toString();
             let start = parseInt(parsed.args[1].toString(), 10);
