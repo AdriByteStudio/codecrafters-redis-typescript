@@ -174,10 +174,38 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             const key = parsed.args[0].toString();
             const id = parsed.args[1].toString();
             const fields = parsed.args.slice(2);
-            const stream = streams.get(key) ?? [];
-            stream.push({ id, fields });
-            streams.set(key, stream);
-            connection.write(bulkString(Buffer.from(id)));
+
+            const [msStr, seqStr] = id.split("-");
+            const ms = parseInt(msStr, 10);
+            const seq = parseInt(seqStr, 10);
+
+            const stream = streams.get(key);
+
+            if (stream === undefined || stream.length === 0) {
+               // Empty stream: the minimum valid ID is 0-1.
+               if (ms === 0 && seq === 0) {
+                  connection.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
+               } else {
+                  const newStream = stream ?? [];
+                  newStream.push({ id, fields });
+                  streams.set(key, newStream);
+                  connection.write(bulkString(Buffer.from(id)));
+               }
+            } else {
+               const last = stream[stream.length - 1];
+               const [lastMsStr, lastSeqStr] = last.id.split("-");
+               const lastMs = parseInt(lastMsStr, 10);
+               const lastSeq = parseInt(lastSeqStr, 10);
+
+               if (ms < lastMs || (ms === lastMs && seq <= lastSeq)) {
+                  connection.write(
+                     "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+                  );
+               } else {
+                  stream.push({ id, fields });
+                  connection.write(bulkString(Buffer.from(id)));
+               }
+            }
          } else if (command === "rpush") {
             const key = parsed.args[0].toString();
             const list = lists.get(key) ?? [];
