@@ -175,25 +175,38 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             const rawId = parsed.args[1].toString();
             const fields = parsed.args.slice(2);
 
-            const [msStr, seqStr] = rawId.split("-");
-            const ms = parseInt(msStr, 10);
             const stream = streams.get(key);
             const last = stream?.[stream.length - 1];
 
-            // Resolve a partially or fully auto-generated sequence number
-            // (e.g. "5-*") into a concrete numeric sequence.
+            // Resolve a fully auto-generated ID ("*") or a partially
+            // auto-generated sequence number (e.g. "5-*") into concrete numbers.
+            let ms: number;
             let seq: number;
-            if (seqStr === "*") {
+            if (rawId === "*") {
+               ms = Date.now();
                if (last !== undefined) {
                   const [lastMsStr, lastSeqStr] = last.id.split("-");
                   const lastMs = parseInt(lastMsStr, 10);
                   const lastSeq = parseInt(lastSeqStr, 10);
                   seq = lastMs === ms ? lastSeq + 1 : 0;
                } else {
-                  seq = ms === 0 ? 1 : 0;
+                  seq = 0;
                }
             } else {
-               seq = parseInt(seqStr, 10);
+               const [msStr, seqStr] = rawId.split("-");
+               ms = parseInt(msStr, 10);
+               if (seqStr === "*") {
+                  if (last !== undefined) {
+                     const [lastMsStr, lastSeqStr] = last.id.split("-");
+                     const lastMs = parseInt(lastMsStr, 10);
+                     const lastSeq = parseInt(lastSeqStr, 10);
+                     seq = lastMs === ms ? lastSeq + 1 : 0;
+                  } else {
+                     seq = ms === 0 ? 1 : 0;
+                  }
+               } else {
+                  seq = parseInt(seqStr, 10);
+               }
             }
             const id = `${ms}-${seq}`;
 
