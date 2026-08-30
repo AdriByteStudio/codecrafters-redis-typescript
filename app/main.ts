@@ -264,9 +264,15 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          } else if (command === "incr") {
             const key = parsed.args[0].toString();
             const value = getValue(key);
-            const incremented = value === undefined ? 1 : parseInt(value.toString(), 10) + 1;
-            store.set(key, { value: Buffer.from(incremented.toString()), expiresAt: null });
-            connection.write(`:${incremented}\r\n`);
+            const current = value === undefined ? 0 : parseInt(value.toString(), 10);
+
+            if (value !== undefined && Number.isNaN(current)) {
+               connection.write("-ERR value is not an integer or out of range\r\n");
+            } else {
+               const incremented = current + 1;
+               store.set(key, { value: Buffer.from(incremented.toString()), expiresAt: null });
+               connection.write(`:${incremented}\r\n`);
+            }
          } else if (command === "type") {
             const key = parsed.args[0].toString();
             if (getValue(key) !== undefined) {
