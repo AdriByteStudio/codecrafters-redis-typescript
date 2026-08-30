@@ -57,6 +57,39 @@ const store = new Map<string, { value: Buffer; expiresAt: number | null }>();
 // In-memory list store, shared across all connections.
 const lists = new Map<string, Buffer[]>();
 
+// Clients blocked on BLPOP, keyed by list name. Each queue is FIFO so the
+// client that has been waiting the longest is served first.
+const blockedClients = new Map<string, net.Socket[]>();
+
+// If a client is waiting on `key` and the list has an element, pop one element
+// and send it to the longest-waiting client. Returns true if a client was served.
+function serveBlockedClient(key: string): boolean {
+   const queue = blockedClients.get(key);
+   if (queue === undefined || queue.length === 0) {
+      return false;
+   }
+
+   const list = lists.get(key);
+   if (list === undefined || list.length === 0) {
+      return false;
+   }
+
+   const socket = queue.shift()!;
+   if (queue.length === 0) {
+      blockedClients.delete(key);
+   }
+
+   const element = list.shift()!;
+   if (list.length === 0) {
+      lists.delete(key);
+   }
+
+   socket.write(
+      Buffer.concat([Buffer.from("*2\r\n"), bulkString(Buffer.from(key)), bulkString(element)])
+   );
+   return true;
+}
+
 // Returns the value for a key, or undefined if the key is missing or expired.
 function getValue(key: string): Buffer | undefined {
    const entry = store.get(key);
@@ -118,6 +151,9 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             lists.set(key, list);
             connection.write(`:${list.length}\r\n`);
+            while (serveBlockedClient(key)) {
+               // Keep serving waiting clients while elements remain.
+            }
          } else if (command === "lpush") {
             const key = parsed.args[0].toString();
             const list = lists.get(key) ?? [];
@@ -126,6 +162,31 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             lists.set(key, list);
             connection.write(`:${list.length}\r\n`);
+            while (serveBlockedClient(key)) {
+               // Keep serving waiting clients while elements remain.
+            }
+         } else if (command === "blpop") {
+            const key = parsed.args[0].toString();
+            const list = lists.get(key);
+
+            if (list !== undefined && list.length > 0) {
+               const element = list.shift()!;
+               if (list.length === 0) {
+                  lists.delete(key);
+               }
+               connection.write(
+                  Buffer.concat([
+                     Buffer.from("*2\r\n"),
+                     bulkString(Buffer.from(key)),
+                     bulkString(element),
+                  ])
+               );
+            } else {
+               // List is empty: block this client until an element is pushed.
+               const queue = blockedClients.get(key) ?? [];
+               queue.push(connection);
+               blockedClients.set(key, queue);
+            }
          } else if (command === "llen") {
             const list = lists.get(parsed.args[0].toString());
             connection.write(`:${list?.length ?? 0}\r\n`);
@@ -177,6 +238,19 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
                   parts.push(bulkString(list[i]));
                }
                connection.write(Buffer.concat(parts));
+            }
+         }
+      }
+   });
+
+   connection.on("close", () => {
+      // Remove this connection from any BLPOP wait queues.
+      for (const [key, queue] of blockedClients) {
+         const index = queue.indexOf(connection);
+         if (index !== -1) {
+            queue.splice(index, 1);
+            if (queue.length === 0) {
+               blockedClients.delete(key);
             }
          }
       }
