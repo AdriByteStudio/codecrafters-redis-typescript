@@ -120,9 +120,19 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             connection.write(`:${list.length}\r\n`);
          } else if (command === "lrange") {
             const key = parsed.args[0].toString();
-            const start = parseInt(parsed.args[1].toString(), 10);
-            const stop = parseInt(parsed.args[2].toString(), 10);
+            let start = parseInt(parsed.args[1].toString(), 10);
+            let stop = parseInt(parsed.args[2].toString(), 10);
             const list = lists.get(key);
+
+            if (list !== undefined) {
+               // Normalize negative indexes: -1 is the last element, etc.
+               if (start < 0) {
+                  start = Math.max(list.length + start, 0);
+               }
+               if (stop < 0) {
+                  stop = Math.max(list.length + stop, 0);
+               }
+            }
 
             if (list === undefined || start >= list.length || start > stop) {
                connection.write("*0\r\n");
