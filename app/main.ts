@@ -58,8 +58,12 @@ const store = new Map<string, { value: Buffer; expiresAt: number | null }>();
 const lists = new Map<string, Buffer[]>();
 
 // Clients blocked on BLPOP, keyed by list name. Each queue is FIFO so the
-// client that has been waiting the longest is served first.
-const blockedClients = new Map<string, net.Socket[]>();
+// client that has been waiting the longest is served first. Each entry also
+// holds the timeout timer so it can be cleared when the client is served.
+const blockedClients = new Map<
+   string,
+   { socket: net.Socket; timer: ReturnType<typeof setTimeout> | null }[]
+>();
 
 // If a client is waiting on `key` and the list has an element, pop one element
 // and send it to the longest-waiting client. Returns true if a client was served.
@@ -74,9 +78,13 @@ function serveBlockedClient(key: string): boolean {
       return false;
    }
 
-   const socket = queue.shift()!;
+   const entry = queue.shift()!;
    if (queue.length === 0) {
       blockedClients.delete(key);
+   }
+
+   if (entry.timer !== null) {
+      clearTimeout(entry.timer);
    }
 
    const element = list.shift()!;
@@ -84,7 +92,7 @@ function serveBlockedClient(key: string): boolean {
       lists.delete(key);
    }
 
-   socket.write(
+   entry.socket.write(
       Buffer.concat([Buffer.from("*2\r\n"), bulkString(Buffer.from(key)), bulkString(element)])
    );
    return true;
@@ -182,9 +190,27 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
                   ])
                );
             } else {
-               // List is empty: block this client until an element is pushed.
+               // List is empty: block this client until an element is pushed
+               // or the timeout (in seconds) expires.
+               const timeout = parseFloat(parsed.args[1].toString());
+               let timer: ReturnType<typeof setTimeout> | null = null;
+               if (timeout > 0) {
+                  timer = setTimeout(() => {
+                     const queue = blockedClients.get(key);
+                     if (queue !== undefined) {
+                        const index = queue.findIndex((e) => e.socket === connection);
+                        if (index !== -1) {
+                           queue.splice(index, 1);
+                           if (queue.length === 0) {
+                              blockedClients.delete(key);
+                           }
+                        }
+                     }
+                     connection.write("*-1\r\n");
+                  }, timeout * 1000);
+               }
                const queue = blockedClients.get(key) ?? [];
-               queue.push(connection);
+               queue.push({ socket: connection, timer });
                blockedClients.set(key, queue);
             }
          } else if (command === "llen") {
@@ -246,8 +272,11 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
    connection.on("close", () => {
       // Remove this connection from any BLPOP wait queues.
       for (const [key, queue] of blockedClients) {
-         const index = queue.indexOf(connection);
+         const index = queue.findIndex((e) => e.socket === connection);
          if (index !== -1) {
+            if (queue[index].timer !== null) {
+               clearTimeout(queue[index].timer);
+            }
             queue.splice(index, 1);
             if (queue.length === 0) {
                blockedClients.delete(key);
