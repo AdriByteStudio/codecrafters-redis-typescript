@@ -54,6 +54,9 @@ function bulkString(value: Buffer): Buffer {
 // Each entry holds the value and an optional expiry timestamp (ms since epoch).
 const store = new Map<string, { value: Buffer; expiresAt: number | null }>();
 
+// In-memory list store, shared across all connections.
+const lists = new Map<string, Buffer[]>();
+
 // Returns the value for a key, or undefined if the key is missing or expired.
 function getValue(key: string): Buffer | undefined {
    const entry = store.get(key);
@@ -107,6 +110,14 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          } else if (command === "get") {
             const value = getValue(parsed.args[0].toString());
             connection.write(value === undefined ? "$-1\r\n" : bulkString(value));
+         } else if (command === "rpush") {
+            const key = parsed.args[0].toString();
+            const list = lists.get(key) ?? [];
+            for (const element of parsed.args.slice(1)) {
+               list.push(element);
+            }
+            lists.set(key, list);
+            connection.write(`:${list.length}\r\n`);
          }
       }
    });
