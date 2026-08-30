@@ -45,6 +45,14 @@ function parseCommand(
    return { command: elements[0].toString(), args: elements.slice(1), consumed: offset };
 }
 
+// Encode a value as a RESP bulk string (e.g. $3\r\nbar\r\n).
+function bulkString(value: Buffer): Buffer {
+   return Buffer.concat([Buffer.from(`$${value.length}\r\n`), value, Buffer.from("\r\n")]);
+}
+
+// In-memory key-value store, shared across all connections.
+const store = new Map<string, Buffer>();
+
 const server: net.Server = net.createServer((connection: net.Socket) => {
    let buffer = Buffer.alloc(0);
 
@@ -63,10 +71,13 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          if (command === "ping") {
             connection.write("+PONG\r\n");
          } else if (command === "echo") {
-            const arg = parsed.args[0];
-            connection.write(
-               Buffer.concat([Buffer.from(`$${arg.length}\r\n`), arg, Buffer.from("\r\n")])
-            );
+            connection.write(bulkString(parsed.args[0]));
+         } else if (command === "set") {
+            store.set(parsed.args[0].toString(), parsed.args[1]);
+            connection.write("+OK\r\n");
+         } else if (command === "get") {
+            const value = store.get(parsed.args[0].toString());
+            connection.write(value === undefined ? "$-1\r\n" : bulkString(value));
          }
       }
    });
