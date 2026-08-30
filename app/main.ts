@@ -393,7 +393,16 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             const keysAndIds = parsed.args.slice(streamsIndex + 1);
             const numStreams = keysAndIds.length / 2;
             const keys = keysAndIds.slice(0, numStreams).map((k) => k.toString());
-            const ids = keysAndIds.slice(numStreams).map((id) => id.toString());
+            // "$" means "the last ID currently in the stream", resolved once
+            // up front so later blocking checks compare against a fixed point.
+            const ids = keysAndIds.slice(numStreams).map((id, i) => {
+               const raw = id.toString();
+               if (raw !== "$") {
+                  return raw;
+               }
+               const stream = streams.get(keys[i]);
+               return stream === undefined || stream.length === 0 ? "0-0" : stream[stream.length - 1].id;
+            });
 
             const { streamParts, matchedStreams } = readStreamsAfter(keys, ids);
 
