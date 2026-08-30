@@ -118,6 +118,22 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             lists.set(key, list);
             connection.write(`:${list.length}\r\n`);
+         } else if (command === "lrange") {
+            const key = parsed.args[0].toString();
+            const start = parseInt(parsed.args[1].toString(), 10);
+            const stop = parseInt(parsed.args[2].toString(), 10);
+            const list = lists.get(key);
+
+            if (list === undefined || start >= list.length || start > stop) {
+               connection.write("*0\r\n");
+            } else {
+               const end = Math.min(stop, list.length - 1);
+               const parts: Buffer[] = [Buffer.from(`*${end - start + 1}\r\n`)];
+               for (let i = start; i <= end; i++) {
+                  parts.push(bulkString(list[i]));
+               }
+               connection.write(Buffer.concat(parts));
+            }
          }
       }
    });
