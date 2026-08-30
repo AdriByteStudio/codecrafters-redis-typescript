@@ -223,6 +223,7 @@ function serveBlockedXreadClients(key: string): void {
 
 const server: net.Server = net.createServer((connection: net.Socket) => {
    let buffer = Buffer.alloc(0);
+   let inTransaction = false;
 
    connection.on("data", (data: Buffer) => {
       buffer = Buffer.concat([buffer, data]);
@@ -241,9 +242,15 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          } else if (command === "echo") {
             connection.write(bulkString(parsed.args[0]));
          } else if (command === "multi") {
+            inTransaction = true;
             connection.write("+OK\r\n");
          } else if (command === "exec") {
-            connection.write("-ERR EXEC without MULTI\r\n");
+            if (!inTransaction) {
+               connection.write("-ERR EXEC without MULTI\r\n");
+            } else {
+               inTransaction = false;
+               connection.write("*0\r\n");
+            }
          } else if (command === "set") {
             const key = parsed.args[0].toString();
             const value = parsed.args[1];
