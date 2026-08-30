@@ -119,6 +119,108 @@ function getValue(key: string): Buffer | undefined {
    return entry.value;
 }
 
+// Builds the RESP array body for XREAD: for each key, all entries with an ID
+// strictly greater than the corresponding "after" ID. Streams with no new
+// entries are omitted, matching XREAD's semantics.
+function readStreamsAfter(
+   keys: string[],
+   ids: string[]
+): { streamParts: Buffer[]; matchedStreams: number } {
+   const streamParts: Buffer[] = [];
+   let matchedStreams = 0;
+
+   for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      const [afterMsStr, afterSeqStr] = ids[i].split("-");
+      const afterMs = parseInt(afterMsStr, 10);
+      const afterSeq = afterSeqStr === undefined ? 0 : parseInt(afterSeqStr, 10);
+
+      const stream = streams.get(key) ?? [];
+      const entries = stream.filter((entry) => {
+         const [entryMsStr, entrySeqStr] = entry.id.split("-");
+         const entryMs = parseInt(entryMsStr, 10);
+         const entrySeq = parseInt(entrySeqStr, 10);
+         return entryMs > afterMs || (entryMs === afterMs && entrySeq > afterSeq);
+      });
+
+      if (entries.length === 0) {
+         continue;
+      }
+      matchedStreams++;
+
+      streamParts.push(Buffer.from("*2\r\n"));
+      streamParts.push(bulkString(Buffer.from(key)));
+      streamParts.push(Buffer.from(`*${entries.length}\r\n`));
+      for (const entry of entries) {
+         streamParts.push(Buffer.from("*2\r\n"));
+         streamParts.push(bulkString(Buffer.from(entry.id)));
+         streamParts.push(Buffer.from(`*${entry.fields.length}\r\n`));
+         for (const field of entry.fields) {
+            streamParts.push(bulkString(field));
+         }
+      }
+   }
+
+   return { streamParts, matchedStreams };
+}
+
+interface XreadWaiter {
+   socket: net.Socket;
+   keys: string[];
+   ids: string[];
+   timer: ReturnType<typeof setTimeout> | null;
+   served: boolean;
+}
+
+// Clients blocked on XREAD BLOCK, keyed by each stream key they're waiting on.
+// A waiter may appear under multiple keys if it specified multiple streams.
+const blockedXreadClients = new Map<string, XreadWaiter[]>();
+
+// Removes a waiter from every stream key's queue it was registered under.
+function removeXreadWaiter(waiter: XreadWaiter): void {
+   for (const key of waiter.keys) {
+      const queue = blockedXreadClients.get(key);
+      if (queue === undefined) {
+         continue;
+      }
+      const index = queue.indexOf(waiter);
+      if (index !== -1) {
+         queue.splice(index, 1);
+      }
+      if (queue.length === 0) {
+         blockedXreadClients.delete(key);
+      }
+   }
+}
+
+// If any client is blocked on XREAD waiting for `key`, check whether it now has
+// new data across all of its requested streams and, if so, unblock it.
+function serveBlockedXreadClients(key: string): void {
+   const queue = blockedXreadClients.get(key);
+   if (queue === undefined) {
+      return;
+   }
+
+   for (const waiter of [...queue]) {
+      if (waiter.served) {
+         continue;
+      }
+      const { streamParts, matchedStreams } = readStreamsAfter(waiter.keys, waiter.ids);
+      if (matchedStreams === 0) {
+         continue;
+      }
+
+      waiter.served = true;
+      if (waiter.timer !== null) {
+         clearTimeout(waiter.timer);
+      }
+      removeXreadWaiter(waiter);
+
+      const parts: Buffer[] = [Buffer.from(`*${matchedStreams}\r\n`), ...streamParts];
+      waiter.socket.write(Buffer.concat(parts));
+   }
+}
+
 const server: net.Server = net.createServer((connection: net.Socket) => {
    let buffer = Buffer.alloc(0);
 
@@ -219,6 +321,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
                newStream.push({ id, fields });
                streams.set(key, newStream);
                connection.write(bulkString(Buffer.from(id)));
+               serveBlockedXreadClients(key);
             } else {
                const [lastMsStr, lastSeqStr] = last.id.split("-");
                const lastMs = parseInt(lastMsStr, 10);
@@ -229,6 +332,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
                   newStream.push({ id, fields });
                   streams.set(key, newStream);
                   connection.write(bulkString(Buffer.from(id)));
+                  serveBlockedXreadClients(key);
                } else {
                   connection.write(
                      "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
@@ -277,7 +381,12 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             connection.write(Buffer.concat(parts));
          } else if (command === "xread") {
-            // Syntax: XREAD STREAMS <key1> [key2 ...] <id1> [id2 ...]
+            // Syntax: XREAD [BLOCK <ms>] STREAMS <key1> [key2 ...] <id1> [id2 ...]
+            let blockTimeout: number | null = null;
+            if (parsed.args[0].toString().toLowerCase() === "block") {
+               blockTimeout = parseInt(parsed.args[1].toString(), 10);
+            }
+
             const streamsIndex = parsed.args.findIndex(
                (arg) => arg.toString().toLowerCase() === "streams"
             );
@@ -286,45 +395,28 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             const keys = keysAndIds.slice(0, numStreams).map((k) => k.toString());
             const ids = keysAndIds.slice(numStreams).map((id) => id.toString());
 
-            const parts: Buffer[] = [];
-            const streamParts: Buffer[] = [];
-            let matchedStreams = 0;
+            const { streamParts, matchedStreams } = readStreamsAfter(keys, ids);
 
-            for (let i = 0; i < keys.length; i++) {
-               const key = keys[i];
-               const [afterMsStr, afterSeqStr] = ids[i].split("-");
-               const afterMs = parseInt(afterMsStr, 10);
-               const afterSeq = afterSeqStr === undefined ? 0 : parseInt(afterSeqStr, 10);
-
-               const stream = streams.get(key) ?? [];
-               const entries = stream.filter((entry) => {
-                  const [entryMsStr, entrySeqStr] = entry.id.split("-");
-                  const entryMs = parseInt(entryMsStr, 10);
-                  const entrySeq = parseInt(entrySeqStr, 10);
-                  return entryMs > afterMs || (entryMs === afterMs && entrySeq > afterSeq);
-               });
-
-               if (entries.length === 0) {
-                  continue;
+            if (matchedStreams > 0 || blockTimeout === null) {
+               const parts: Buffer[] = [Buffer.from(`*${matchedStreams}\r\n`), ...streamParts];
+               connection.write(Buffer.concat(parts));
+            } else {
+               // No data yet: block this client until a new entry is added to
+               // one of the requested streams, or the timeout expires.
+               const waiter: XreadWaiter = { socket: connection, keys, ids, timer: null, served: false };
+               if (blockTimeout > 0) {
+                  waiter.timer = setTimeout(() => {
+                     waiter.served = true;
+                     removeXreadWaiter(waiter);
+                     connection.write("*-1\r\n");
+                  }, blockTimeout);
                }
-               matchedStreams++;
-
-               streamParts.push(Buffer.from("*2\r\n"));
-               streamParts.push(bulkString(Buffer.from(key)));
-               streamParts.push(Buffer.from(`*${entries.length}\r\n`));
-               for (const entry of entries) {
-                  streamParts.push(Buffer.from("*2\r\n"));
-                  streamParts.push(bulkString(Buffer.from(entry.id)));
-                  streamParts.push(Buffer.from(`*${entry.fields.length}\r\n`));
-                  for (const field of entry.fields) {
-                     streamParts.push(bulkString(field));
-                  }
+               for (const key of keys) {
+                  const queue = blockedXreadClients.get(key) ?? [];
+                  queue.push(waiter);
+                  blockedXreadClients.set(key, queue);
                }
             }
-
-            parts.push(Buffer.from(`*${matchedStreams}\r\n`));
-            parts.push(...streamParts);
-            connection.write(Buffer.concat(parts));
          } else if (command === "rpush") {
             const key = parsed.args[0].toString();
             const list = lists.get(key) ?? [];
