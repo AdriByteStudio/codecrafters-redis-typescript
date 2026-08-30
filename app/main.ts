@@ -235,6 +235,43 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
                   );
                }
             }
+         } else if (command === "xrange") {
+            const key = parsed.args[0].toString();
+            const startArg = parsed.args[1].toString();
+            const endArg = parsed.args[2].toString();
+
+            const parseRangeId = (arg: string, defaultSeq: number): [number, number] => {
+               const [msPart, seqPart] = arg.split("-");
+               const ms = parseInt(msPart, 10);
+               const seq = seqPart === undefined ? defaultSeq : parseInt(seqPart, 10);
+               return [ms, seq];
+            };
+
+            const [startMs, startSeq] = parseRangeId(startArg, 0);
+            const [endMs, endSeq] = parseRangeId(endArg, Number.MAX_SAFE_INTEGER);
+
+            const stream = streams.get(key) ?? [];
+            const entries = stream.filter((entry) => {
+               const [entryMsStr, entrySeqStr] = entry.id.split("-");
+               const entryMs = parseInt(entryMsStr, 10);
+               const entrySeq = parseInt(entrySeqStr, 10);
+
+               const afterStart =
+                  entryMs > startMs || (entryMs === startMs && entrySeq >= startSeq);
+               const beforeEnd = entryMs < endMs || (entryMs === endMs && entrySeq <= endSeq);
+               return afterStart && beforeEnd;
+            });
+
+            const parts: Buffer[] = [Buffer.from(`*${entries.length}\r\n`)];
+            for (const entry of entries) {
+               parts.push(Buffer.from("*2\r\n"));
+               parts.push(bulkString(Buffer.from(entry.id)));
+               parts.push(Buffer.from(`*${entry.fields.length}\r\n`));
+               for (const field of entry.fields) {
+                  parts.push(bulkString(field));
+               }
+            }
+            connection.write(Buffer.concat(parts));
          } else if (command === "rpush") {
             const key = parsed.args[0].toString();
             const list = lists.get(key) ?? [];
