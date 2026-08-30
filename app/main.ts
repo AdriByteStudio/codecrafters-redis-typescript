@@ -224,6 +224,7 @@ function serveBlockedXreadClients(key: string): void {
 const server: net.Server = net.createServer((connection: net.Socket) => {
    let buffer = Buffer.alloc(0);
    let inTransaction = false;
+   const queuedCommands: { command: string; args: Buffer[] }[] = [];
 
    connection.on("data", (data: Buffer) => {
       buffer = Buffer.concat([buffer, data]);
@@ -236,6 +237,12 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
 
          buffer = buffer.subarray(parsed.consumed);
          const command = parsed.command.toLowerCase();
+
+         if (inTransaction && command !== "multi" && command !== "exec") {
+            queuedCommands.push({ command, args: parsed.args });
+            connection.write("+QUEUED\r\n");
+            continue;
+         }
 
          if (command === "ping") {
             connection.write("+PONG\r\n");
