@@ -129,6 +129,18 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          } else if (command === "llen") {
             const list = lists.get(parsed.args[0].toString());
             connection.write(`:${list?.length ?? 0}\r\n`);
+         } else if (command === "lpop") {
+            const key = parsed.args[0].toString();
+            const list = lists.get(key);
+            if (list === undefined || list.length === 0) {
+               connection.write("$-1\r\n");
+            } else {
+               const element = list.shift()!;
+               if (list.length === 0) {
+                  lists.delete(key);
+               }
+               connection.write(bulkString(element));
+            }
          } else if (command === "lrange") {
             const key = parsed.args[0].toString();
             let start = parseInt(parsed.args[1].toString(), 10);
