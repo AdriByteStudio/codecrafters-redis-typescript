@@ -276,6 +276,55 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
                }
             }
             connection.write(Buffer.concat(parts));
+         } else if (command === "xread") {
+            // Syntax: XREAD STREAMS <key1> [key2 ...] <id1> [id2 ...]
+            const streamsIndex = parsed.args.findIndex(
+               (arg) => arg.toString().toLowerCase() === "streams"
+            );
+            const keysAndIds = parsed.args.slice(streamsIndex + 1);
+            const numStreams = keysAndIds.length / 2;
+            const keys = keysAndIds.slice(0, numStreams).map((k) => k.toString());
+            const ids = keysAndIds.slice(numStreams).map((id) => id.toString());
+
+            const parts: Buffer[] = [];
+            const streamParts: Buffer[] = [];
+            let matchedStreams = 0;
+
+            for (let i = 0; i < keys.length; i++) {
+               const key = keys[i];
+               const [afterMsStr, afterSeqStr] = ids[i].split("-");
+               const afterMs = parseInt(afterMsStr, 10);
+               const afterSeq = afterSeqStr === undefined ? 0 : parseInt(afterSeqStr, 10);
+
+               const stream = streams.get(key) ?? [];
+               const entries = stream.filter((entry) => {
+                  const [entryMsStr, entrySeqStr] = entry.id.split("-");
+                  const entryMs = parseInt(entryMsStr, 10);
+                  const entrySeq = parseInt(entrySeqStr, 10);
+                  return entryMs > afterMs || (entryMs === afterMs && entrySeq > afterSeq);
+               });
+
+               if (entries.length === 0) {
+                  continue;
+               }
+               matchedStreams++;
+
+               streamParts.push(Buffer.from("*2\r\n"));
+               streamParts.push(bulkString(Buffer.from(key)));
+               streamParts.push(Buffer.from(`*${entries.length}\r\n`));
+               for (const entry of entries) {
+                  streamParts.push(Buffer.from("*2\r\n"));
+                  streamParts.push(bulkString(Buffer.from(entry.id)));
+                  streamParts.push(Buffer.from(`*${entry.fields.length}\r\n`));
+                  for (const field of entry.fields) {
+                     streamParts.push(bulkString(field));
+                  }
+               }
+            }
+
+            parts.push(Buffer.from(`*${matchedStreams}\r\n`));
+            parts.push(...streamParts);
+            connection.write(Buffer.concat(parts));
          } else if (command === "rpush") {
             const key = parsed.args[0].toString();
             const list = lists.get(key) ?? [];
