@@ -118,6 +118,14 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             lists.set(key, list);
             connection.write(`:${list.length}\r\n`);
+         } else if (command === "lpush") {
+            const key = parsed.args[0].toString();
+            const list = lists.get(key) ?? [];
+            for (const element of parsed.args.slice(1)) {
+               list.unshift(element);
+            }
+            lists.set(key, list);
+            connection.write(`:${list.length}\r\n`);
          } else if (command === "lrange") {
             const key = parsed.args[0].toString();
             let start = parseInt(parsed.args[1].toString(), 10);
