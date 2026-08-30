@@ -134,6 +134,17 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             const list = lists.get(key);
             if (list === undefined || list.length === 0) {
                connection.write("$-1\r\n");
+            } else if (parsed.args.length > 1) {
+               const count = parseInt(parsed.args[1].toString(), 10);
+               const removed = list.splice(0, count);
+               if (list.length === 0) {
+                  lists.delete(key);
+               }
+               const parts: Buffer[] = [Buffer.from(`*${removed.length}\r\n`)];
+               for (const element of removed) {
+                  parts.push(bulkString(element));
+               }
+               connection.write(Buffer.concat(parts));
             } else {
                const element = list.shift()!;
                if (list.length === 0) {
