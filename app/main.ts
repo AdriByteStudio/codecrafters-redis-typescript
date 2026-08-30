@@ -226,6 +226,349 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
    let inTransaction = false;
    const queuedCommands: { command: string; args: Buffer[] }[] = [];
 
+   // When set, command replies are collected here (used while replaying a
+   // transaction's queued commands) instead of being written to the socket.
+   let responseSink: Buffer[] | null = null;
+   const send = (data: string | Buffer): void => {
+      const buf = typeof data === "string" ? Buffer.from(data) : data;
+      if (responseSink !== null) {
+         responseSink.push(buf);
+      } else {
+         connection.write(buf);
+      }
+   };
+
+   function executeCommand(command: string, args: Buffer[]): void {
+      if (command === "ping") {
+         send("+PONG\r\n");
+      } else if (command === "echo") {
+         send(bulkString(args[0]));
+      } else if (command === "multi") {
+         inTransaction = true;
+         send("+OK\r\n");
+      } else if (command === "exec") {
+         if (!inTransaction) {
+            send("-ERR EXEC without MULTI\r\n");
+         } else {
+            inTransaction = false;
+            const queued = queuedCommands.splice(0, queuedCommands.length);
+            const results: Buffer[] = [];
+            for (const queuedCommand of queued) {
+               const previousSink = responseSink;
+               responseSink = [];
+               executeCommand(queuedCommand.command, queuedCommand.args);
+               results.push(...responseSink);
+               responseSink = previousSink;
+            }
+            send(Buffer.concat([Buffer.from(`*${queued.length}\r\n`), ...results]));
+         }
+      } else if (command === "set") {
+         const key = args[0].toString();
+         const value = args[1];
+
+         // Parse optional expiry options: EX <seconds> or PX <milliseconds>.
+         let expiresAt: number | null = null;
+         for (let i = 2; i + 1 < args.length; i += 2) {
+            const option = args[i].toString().toLowerCase();
+            const amount = parseInt(args[i + 1].toString(), 10);
+            if (option === "ex") {
+               expiresAt = Date.now() + amount * 1000;
+            } else if (option === "px") {
+               expiresAt = Date.now() + amount;
+            }
+         }
+
+         store.set(key, { value, expiresAt });
+         send("+OK\r\n");
+      } else if (command === "get") {
+         const value = getValue(args[0].toString());
+         send(value === undefined ? "$-1\r\n" : bulkString(value));
+      } else if (command === "incr") {
+         const key = args[0].toString();
+         const value = getValue(key);
+         const current = value === undefined ? 0 : parseInt(value.toString(), 10);
+
+         if (value !== undefined && Number.isNaN(current)) {
+            send("-ERR value is not an integer or out of range\r\n");
+         } else {
+            const incremented = current + 1;
+            store.set(key, { value: Buffer.from(incremented.toString()), expiresAt: null });
+            send(`:${incremented}\r\n`);
+         }
+      } else if (command === "type") {
+         const key = args[0].toString();
+         if (getValue(key) !== undefined) {
+            send("+string\r\n");
+         } else if (lists.has(key)) {
+            send("+list\r\n");
+         } else if (streams.has(key)) {
+            send("+stream\r\n");
+         } else {
+            send("+none\r\n");
+         }
+      } else if (command === "xadd") {
+         const key = args[0].toString();
+         const rawId = args[1].toString();
+         const fields = args.slice(2);
+
+         const stream = streams.get(key);
+         const last = stream?.[stream.length - 1];
+
+         // Resolve a fully auto-generated ID ("*") or a partially
+         // auto-generated sequence number (e.g. "5-*") into concrete numbers.
+         let ms: number;
+         let seq: number;
+         if (rawId === "*") {
+            ms = Date.now();
+            if (last !== undefined) {
+               const [lastMsStr, lastSeqStr] = last.id.split("-");
+               const lastMs = parseInt(lastMsStr, 10);
+               const lastSeq = parseInt(lastSeqStr, 10);
+               seq = lastMs === ms ? lastSeq + 1 : 0;
+            } else {
+               seq = 0;
+            }
+         } else {
+            const [msStr, seqStr] = rawId.split("-");
+            ms = parseInt(msStr, 10);
+            if (seqStr === "*") {
+               if (last !== undefined) {
+                  const [lastMsStr, lastSeqStr] = last.id.split("-");
+                  const lastMs = parseInt(lastMsStr, 10);
+                  const lastSeq = parseInt(lastSeqStr, 10);
+                  seq = lastMs === ms ? lastSeq + 1 : 0;
+               } else {
+                  seq = ms === 0 ? 1 : 0;
+               }
+            } else {
+               seq = parseInt(seqStr, 10);
+            }
+         }
+         const id = `${ms}-${seq}`;
+
+         // 0-0 is always invalid, regardless of stream state.
+         if (ms === 0 && seq === 0) {
+            send("-ERR The ID specified in XADD must be greater than 0-0\r\n");
+         } else if (last === undefined) {
+            // Stream is empty (0-0 already rejected above).
+            const newStream = stream ?? [];
+            newStream.push({ id, fields });
+            streams.set(key, newStream);
+            send(bulkString(Buffer.from(id)));
+            serveBlockedXreadClients(key);
+         } else {
+            const [lastMsStr, lastSeqStr] = last.id.split("-");
+            const lastMs = parseInt(lastMsStr, 10);
+            const lastSeq = parseInt(lastSeqStr, 10);
+
+            if (ms > lastMs || (ms === lastMs && seq > lastSeq)) {
+               const newStream = stream ?? [];
+               newStream.push({ id, fields });
+               streams.set(key, newStream);
+               send(bulkString(Buffer.from(id)));
+               serveBlockedXreadClients(key);
+            } else {
+               send(
+                  "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+               );
+            }
+         }
+      } else if (command === "xrange") {
+         const key = args[0].toString();
+         const startArg = args[1].toString();
+         const endArg = args[2].toString();
+
+         const parseRangeId = (arg: string, defaultSeq: number): [number, number] => {
+            const [msPart, seqPart] = arg.split("-");
+            const ms = parseInt(msPart, 10);
+            const seq = seqPart === undefined ? defaultSeq : parseInt(seqPart, 10);
+            return [ms, seq];
+         };
+
+         const [startMs, startSeq] = startArg === "-" ? [0, 0] : parseRangeId(startArg, 0);
+         const [endMs, endSeq] =
+            endArg === "+"
+               ? [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]
+               : parseRangeId(endArg, Number.MAX_SAFE_INTEGER);
+
+         const stream = streams.get(key) ?? [];
+         const entries = stream.filter((entry) => {
+            const [entryMsStr, entrySeqStr] = entry.id.split("-");
+            const entryMs = parseInt(entryMsStr, 10);
+            const entrySeq = parseInt(entrySeqStr, 10);
+
+            const afterStart = entryMs > startMs || (entryMs === startMs && entrySeq >= startSeq);
+            const beforeEnd = entryMs < endMs || (entryMs === endMs && entrySeq <= endSeq);
+            return afterStart && beforeEnd;
+         });
+
+         const parts: Buffer[] = [Buffer.from(`*${entries.length}\r\n`)];
+         for (const entry of entries) {
+            parts.push(Buffer.from("*2\r\n"));
+            parts.push(bulkString(Buffer.from(entry.id)));
+            parts.push(Buffer.from(`*${entry.fields.length}\r\n`));
+            for (const field of entry.fields) {
+               parts.push(bulkString(field));
+            }
+         }
+         send(Buffer.concat(parts));
+      } else if (command === "xread") {
+         // Syntax: XREAD [BLOCK <ms>] STREAMS <key1> [key2 ...] <id1> [id2 ...]
+         let blockTimeout: number | null = null;
+         if (args[0].toString().toLowerCase() === "block") {
+            blockTimeout = parseInt(args[1].toString(), 10);
+         }
+
+         const streamsIndex = args.findIndex((arg) => arg.toString().toLowerCase() === "streams");
+         const keysAndIds = args.slice(streamsIndex + 1);
+         const numStreams = keysAndIds.length / 2;
+         const keys = keysAndIds.slice(0, numStreams).map((k) => k.toString());
+         // "$" means "the last ID currently in the stream", resolved once
+         // up front so later blocking checks compare against a fixed point.
+         const ids = keysAndIds.slice(numStreams).map((id, i) => {
+            const raw = id.toString();
+            if (raw !== "$") {
+               return raw;
+            }
+            const stream = streams.get(keys[i]);
+            return stream === undefined || stream.length === 0 ? "0-0" : stream[stream.length - 1].id;
+         });
+
+         const { streamParts, matchedStreams } = readStreamsAfter(keys, ids);
+
+         if (matchedStreams > 0 || blockTimeout === null) {
+            const parts: Buffer[] = [Buffer.from(`*${matchedStreams}\r\n`), ...streamParts];
+            send(Buffer.concat(parts));
+         } else {
+            // No data yet: block this client until a new entry is added to
+            // one of the requested streams, or the timeout expires.
+            const waiter: XreadWaiter = { socket: connection, keys, ids, timer: null, served: false };
+            if (blockTimeout > 0) {
+               waiter.timer = setTimeout(() => {
+                  waiter.served = true;
+                  removeXreadWaiter(waiter);
+                  connection.write("*-1\r\n");
+               }, blockTimeout);
+            }
+            for (const key of keys) {
+               const queue = blockedXreadClients.get(key) ?? [];
+               queue.push(waiter);
+               blockedXreadClients.set(key, queue);
+            }
+         }
+      } else if (command === "rpush") {
+         const key = args[0].toString();
+         const list = lists.get(key) ?? [];
+         for (const element of args.slice(1)) {
+            list.push(element);
+         }
+         lists.set(key, list);
+         send(`:${list.length}\r\n`);
+         while (serveBlockedClient(key)) {
+            // Keep serving waiting clients while elements remain.
+         }
+      } else if (command === "lpush") {
+         const key = args[0].toString();
+         const list = lists.get(key) ?? [];
+         for (const element of args.slice(1)) {
+            list.unshift(element);
+         }
+         lists.set(key, list);
+         send(`:${list.length}\r\n`);
+         while (serveBlockedClient(key)) {
+            // Keep serving waiting clients while elements remain.
+         }
+      } else if (command === "blpop") {
+         const key = args[0].toString();
+         const list = lists.get(key);
+
+         if (list !== undefined && list.length > 0) {
+            const element = list.shift()!;
+            if (list.length === 0) {
+               lists.delete(key);
+            }
+            send(
+               Buffer.concat([Buffer.from("*2\r\n"), bulkString(Buffer.from(key)), bulkString(element)])
+            );
+         } else {
+            // List is empty: block this client until an element is pushed
+            // or the timeout (in seconds) expires.
+            const timeout = parseFloat(args[1].toString());
+            let timer: ReturnType<typeof setTimeout> | null = null;
+            if (timeout > 0) {
+               timer = setTimeout(() => {
+                  const queue = blockedClients.get(key);
+                  if (queue !== undefined) {
+                     const index = queue.findIndex((e) => e.socket === connection);
+                     if (index !== -1) {
+                        queue.splice(index, 1);
+                        if (queue.length === 0) {
+                           blockedClients.delete(key);
+                        }
+                     }
+                  }
+                  connection.write("*-1\r\n");
+               }, timeout * 1000);
+            }
+            const queue = blockedClients.get(key) ?? [];
+            queue.push({ socket: connection, timer });
+            blockedClients.set(key, queue);
+         }
+      } else if (command === "llen") {
+         const list = lists.get(args[0].toString());
+         send(`:${list?.length ?? 0}\r\n`);
+      } else if (command === "lpop") {
+         const key = args[0].toString();
+         const list = lists.get(key);
+         if (list === undefined || list.length === 0) {
+            send("$-1\r\n");
+         } else if (args.length > 1) {
+            const count = parseInt(args[1].toString(), 10);
+            const removed = list.splice(0, count);
+            if (list.length === 0) {
+               lists.delete(key);
+            }
+            const parts: Buffer[] = [Buffer.from(`*${removed.length}\r\n`)];
+            for (const element of removed) {
+               parts.push(bulkString(element));
+            }
+            send(Buffer.concat(parts));
+         } else {
+            const element = list.shift()!;
+            if (list.length === 0) {
+               lists.delete(key);
+            }
+            send(bulkString(element));
+         }
+      } else if (command === "lrange") {
+         const key = args[0].toString();
+         let start = parseInt(args[1].toString(), 10);
+         let stop = parseInt(args[2].toString(), 10);
+         const list = lists.get(key);
+
+         if (list !== undefined) {
+            // Normalize negative indexes: -1 is the last element, etc.
+            if (start < 0) {
+               start = Math.max(list.length + start, 0);
+            }
+            if (stop < 0) {
+               stop = Math.max(list.length + stop, 0);
+            }
+         }
+
+         if (list === undefined || start >= list.length || start > stop) {
+            send("*0\r\n");
+         } else {
+            const end = Math.min(stop, list.length - 1);
+            const parts: Buffer[] = [Buffer.from(`*${end - start + 1}\r\n`)];
+            for (let i = start; i <= end; i++) {
+               parts.push(bulkString(list[i]));
+            }
+            send(Buffer.concat(parts));
+         }
+      }
+   }
+
    connection.on("data", (data: Buffer) => {
       buffer = Buffer.concat([buffer, data]);
 
@@ -244,333 +587,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             continue;
          }
 
-         if (command === "ping") {
-            connection.write("+PONG\r\n");
-         } else if (command === "echo") {
-            connection.write(bulkString(parsed.args[0]));
-         } else if (command === "multi") {
-            inTransaction = true;
-            connection.write("+OK\r\n");
-         } else if (command === "exec") {
-            if (!inTransaction) {
-               connection.write("-ERR EXEC without MULTI\r\n");
-            } else {
-               inTransaction = false;
-               connection.write("*0\r\n");
-            }
-         } else if (command === "set") {
-            const key = parsed.args[0].toString();
-            const value = parsed.args[1];
-
-            // Parse optional expiry options: EX <seconds> or PX <milliseconds>.
-            let expiresAt: number | null = null;
-            for (let i = 2; i + 1 < parsed.args.length; i += 2) {
-               const option = parsed.args[i].toString().toLowerCase();
-               const amount = parseInt(parsed.args[i + 1].toString(), 10);
-               if (option === "ex") {
-                  expiresAt = Date.now() + amount * 1000;
-               } else if (option === "px") {
-                  expiresAt = Date.now() + amount;
-               }
-            }
-
-            store.set(key, { value, expiresAt });
-            connection.write("+OK\r\n");
-         } else if (command === "get") {
-            const value = getValue(parsed.args[0].toString());
-            connection.write(value === undefined ? "$-1\r\n" : bulkString(value));
-         } else if (command === "incr") {
-            const key = parsed.args[0].toString();
-            const value = getValue(key);
-            const current = value === undefined ? 0 : parseInt(value.toString(), 10);
-
-            if (value !== undefined && Number.isNaN(current)) {
-               connection.write("-ERR value is not an integer or out of range\r\n");
-            } else {
-               const incremented = current + 1;
-               store.set(key, { value: Buffer.from(incremented.toString()), expiresAt: null });
-               connection.write(`:${incremented}\r\n`);
-            }
-         } else if (command === "type") {
-            const key = parsed.args[0].toString();
-            if (getValue(key) !== undefined) {
-               connection.write("+string\r\n");
-            } else if (lists.has(key)) {
-               connection.write("+list\r\n");
-            } else if (streams.has(key)) {
-               connection.write("+stream\r\n");
-            } else {
-               connection.write("+none\r\n");
-            }
-         } else if (command === "xadd") {
-            const key = parsed.args[0].toString();
-            const rawId = parsed.args[1].toString();
-            const fields = parsed.args.slice(2);
-
-            const stream = streams.get(key);
-            const last = stream?.[stream.length - 1];
-
-            // Resolve a fully auto-generated ID ("*") or a partially
-            // auto-generated sequence number (e.g. "5-*") into concrete numbers.
-            let ms: number;
-            let seq: number;
-            if (rawId === "*") {
-               ms = Date.now();
-               if (last !== undefined) {
-                  const [lastMsStr, lastSeqStr] = last.id.split("-");
-                  const lastMs = parseInt(lastMsStr, 10);
-                  const lastSeq = parseInt(lastSeqStr, 10);
-                  seq = lastMs === ms ? lastSeq + 1 : 0;
-               } else {
-                  seq = 0;
-               }
-            } else {
-               const [msStr, seqStr] = rawId.split("-");
-               ms = parseInt(msStr, 10);
-               if (seqStr === "*") {
-                  if (last !== undefined) {
-                     const [lastMsStr, lastSeqStr] = last.id.split("-");
-                     const lastMs = parseInt(lastMsStr, 10);
-                     const lastSeq = parseInt(lastSeqStr, 10);
-                     seq = lastMs === ms ? lastSeq + 1 : 0;
-                  } else {
-                     seq = ms === 0 ? 1 : 0;
-                  }
-               } else {
-                  seq = parseInt(seqStr, 10);
-               }
-            }
-            const id = `${ms}-${seq}`;
-
-            // 0-0 is always invalid, regardless of stream state.
-            if (ms === 0 && seq === 0) {
-               connection.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
-            } else if (last === undefined) {
-               // Stream is empty (0-0 already rejected above).
-               const newStream = stream ?? [];
-               newStream.push({ id, fields });
-               streams.set(key, newStream);
-               connection.write(bulkString(Buffer.from(id)));
-               serveBlockedXreadClients(key);
-            } else {
-               const [lastMsStr, lastSeqStr] = last.id.split("-");
-               const lastMs = parseInt(lastMsStr, 10);
-               const lastSeq = parseInt(lastSeqStr, 10);
-
-               if (ms > lastMs || (ms === lastMs && seq > lastSeq)) {
-                  const newStream = stream ?? [];
-                  newStream.push({ id, fields });
-                  streams.set(key, newStream);
-                  connection.write(bulkString(Buffer.from(id)));
-                  serveBlockedXreadClients(key);
-               } else {
-                  connection.write(
-                     "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
-                  );
-               }
-            }
-         } else if (command === "xrange") {
-            const key = parsed.args[0].toString();
-            const startArg = parsed.args[1].toString();
-            const endArg = parsed.args[2].toString();
-
-            const parseRangeId = (arg: string, defaultSeq: number): [number, number] => {
-               const [msPart, seqPart] = arg.split("-");
-               const ms = parseInt(msPart, 10);
-               const seq = seqPart === undefined ? defaultSeq : parseInt(seqPart, 10);
-               return [ms, seq];
-            };
-
-            const [startMs, startSeq] =
-               startArg === "-" ? [0, 0] : parseRangeId(startArg, 0);
-            const [endMs, endSeq] =
-               endArg === "+"
-                  ? [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER]
-                  : parseRangeId(endArg, Number.MAX_SAFE_INTEGER);
-
-            const stream = streams.get(key) ?? [];
-            const entries = stream.filter((entry) => {
-               const [entryMsStr, entrySeqStr] = entry.id.split("-");
-               const entryMs = parseInt(entryMsStr, 10);
-               const entrySeq = parseInt(entrySeqStr, 10);
-
-               const afterStart =
-                  entryMs > startMs || (entryMs === startMs && entrySeq >= startSeq);
-               const beforeEnd = entryMs < endMs || (entryMs === endMs && entrySeq <= endSeq);
-               return afterStart && beforeEnd;
-            });
-
-            const parts: Buffer[] = [Buffer.from(`*${entries.length}\r\n`)];
-            for (const entry of entries) {
-               parts.push(Buffer.from("*2\r\n"));
-               parts.push(bulkString(Buffer.from(entry.id)));
-               parts.push(Buffer.from(`*${entry.fields.length}\r\n`));
-               for (const field of entry.fields) {
-                  parts.push(bulkString(field));
-               }
-            }
-            connection.write(Buffer.concat(parts));
-         } else if (command === "xread") {
-            // Syntax: XREAD [BLOCK <ms>] STREAMS <key1> [key2 ...] <id1> [id2 ...]
-            let blockTimeout: number | null = null;
-            if (parsed.args[0].toString().toLowerCase() === "block") {
-               blockTimeout = parseInt(parsed.args[1].toString(), 10);
-            }
-
-            const streamsIndex = parsed.args.findIndex(
-               (arg) => arg.toString().toLowerCase() === "streams"
-            );
-            const keysAndIds = parsed.args.slice(streamsIndex + 1);
-            const numStreams = keysAndIds.length / 2;
-            const keys = keysAndIds.slice(0, numStreams).map((k) => k.toString());
-            // "$" means "the last ID currently in the stream", resolved once
-            // up front so later blocking checks compare against a fixed point.
-            const ids = keysAndIds.slice(numStreams).map((id, i) => {
-               const raw = id.toString();
-               if (raw !== "$") {
-                  return raw;
-               }
-               const stream = streams.get(keys[i]);
-               return stream === undefined || stream.length === 0 ? "0-0" : stream[stream.length - 1].id;
-            });
-
-            const { streamParts, matchedStreams } = readStreamsAfter(keys, ids);
-
-            if (matchedStreams > 0 || blockTimeout === null) {
-               const parts: Buffer[] = [Buffer.from(`*${matchedStreams}\r\n`), ...streamParts];
-               connection.write(Buffer.concat(parts));
-            } else {
-               // No data yet: block this client until a new entry is added to
-               // one of the requested streams, or the timeout expires.
-               const waiter: XreadWaiter = { socket: connection, keys, ids, timer: null, served: false };
-               if (blockTimeout > 0) {
-                  waiter.timer = setTimeout(() => {
-                     waiter.served = true;
-                     removeXreadWaiter(waiter);
-                     connection.write("*-1\r\n");
-                  }, blockTimeout);
-               }
-               for (const key of keys) {
-                  const queue = blockedXreadClients.get(key) ?? [];
-                  queue.push(waiter);
-                  blockedXreadClients.set(key, queue);
-               }
-            }
-         } else if (command === "rpush") {
-            const key = parsed.args[0].toString();
-            const list = lists.get(key) ?? [];
-            for (const element of parsed.args.slice(1)) {
-               list.push(element);
-            }
-            lists.set(key, list);
-            connection.write(`:${list.length}\r\n`);
-            while (serveBlockedClient(key)) {
-               // Keep serving waiting clients while elements remain.
-            }
-         } else if (command === "lpush") {
-            const key = parsed.args[0].toString();
-            const list = lists.get(key) ?? [];
-            for (const element of parsed.args.slice(1)) {
-               list.unshift(element);
-            }
-            lists.set(key, list);
-            connection.write(`:${list.length}\r\n`);
-            while (serveBlockedClient(key)) {
-               // Keep serving waiting clients while elements remain.
-            }
-         } else if (command === "blpop") {
-            const key = parsed.args[0].toString();
-            const list = lists.get(key);
-
-            if (list !== undefined && list.length > 0) {
-               const element = list.shift()!;
-               if (list.length === 0) {
-                  lists.delete(key);
-               }
-               connection.write(
-                  Buffer.concat([
-                     Buffer.from("*2\r\n"),
-                     bulkString(Buffer.from(key)),
-                     bulkString(element),
-                  ])
-               );
-            } else {
-               // List is empty: block this client until an element is pushed
-               // or the timeout (in seconds) expires.
-               const timeout = parseFloat(parsed.args[1].toString());
-               let timer: ReturnType<typeof setTimeout> | null = null;
-               if (timeout > 0) {
-                  timer = setTimeout(() => {
-                     const queue = blockedClients.get(key);
-                     if (queue !== undefined) {
-                        const index = queue.findIndex((e) => e.socket === connection);
-                        if (index !== -1) {
-                           queue.splice(index, 1);
-                           if (queue.length === 0) {
-                              blockedClients.delete(key);
-                           }
-                        }
-                     }
-                     connection.write("*-1\r\n");
-                  }, timeout * 1000);
-               }
-               const queue = blockedClients.get(key) ?? [];
-               queue.push({ socket: connection, timer });
-               blockedClients.set(key, queue);
-            }
-         } else if (command === "llen") {
-            const list = lists.get(parsed.args[0].toString());
-            connection.write(`:${list?.length ?? 0}\r\n`);
-         } else if (command === "lpop") {
-            const key = parsed.args[0].toString();
-            const list = lists.get(key);
-            if (list === undefined || list.length === 0) {
-               connection.write("$-1\r\n");
-            } else if (parsed.args.length > 1) {
-               const count = parseInt(parsed.args[1].toString(), 10);
-               const removed = list.splice(0, count);
-               if (list.length === 0) {
-                  lists.delete(key);
-               }
-               const parts: Buffer[] = [Buffer.from(`*${removed.length}\r\n`)];
-               for (const element of removed) {
-                  parts.push(bulkString(element));
-               }
-               connection.write(Buffer.concat(parts));
-            } else {
-               const element = list.shift()!;
-               if (list.length === 0) {
-                  lists.delete(key);
-               }
-               connection.write(bulkString(element));
-            }
-         } else if (command === "lrange") {
-            const key = parsed.args[0].toString();
-            let start = parseInt(parsed.args[1].toString(), 10);
-            let stop = parseInt(parsed.args[2].toString(), 10);
-            const list = lists.get(key);
-
-            if (list !== undefined) {
-               // Normalize negative indexes: -1 is the last element, etc.
-               if (start < 0) {
-                  start = Math.max(list.length + start, 0);
-               }
-               if (stop < 0) {
-                  stop = Math.max(list.length + stop, 0);
-               }
-            }
-
-            if (list === undefined || start >= list.length || start > stop) {
-               connection.write("*0\r\n");
-            } else {
-               const end = Math.min(stop, list.length - 1);
-               const parts: Buffer[] = [Buffer.from(`*${end - start + 1}\r\n`)];
-               for (let i = start; i <= end; i++) {
-                  parts.push(bulkString(list[i]));
-               }
-               connection.write(Buffer.concat(parts));
-            }
-         }
+         executeCommand(command, parsed.args);
       }
    });
 
