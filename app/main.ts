@@ -179,31 +179,33 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             const ms = parseInt(msStr, 10);
             const seq = parseInt(seqStr, 10);
 
-            const stream = streams.get(key);
-
-            if (stream === undefined || stream.length === 0) {
-               // Empty stream: the minimum valid ID is 0-1.
-               if (ms === 0 && seq === 0) {
-                  connection.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
-               } else {
+            // 0-0 is always invalid, regardless of stream state.
+            if (ms === 0 && seq === 0) {
+               connection.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
+            } else {
+               const stream = streams.get(key);
+               const last = stream?.[stream.length - 1];
+               if (last === undefined) {
+                  // Stream is empty (0-0 already rejected above).
                   const newStream = stream ?? [];
                   newStream.push({ id, fields });
                   streams.set(key, newStream);
                   connection.write(bulkString(Buffer.from(id)));
-               }
-            } else {
-               const last = stream[stream.length - 1];
-               const [lastMsStr, lastSeqStr] = last.id.split("-");
-               const lastMs = parseInt(lastMsStr, 10);
-               const lastSeq = parseInt(lastSeqStr, 10);
-
-               if (ms < lastMs || (ms === lastMs && seq <= lastSeq)) {
-                  connection.write(
-                     "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
-                  );
                } else {
-                  stream.push({ id, fields });
-                  connection.write(bulkString(Buffer.from(id)));
+                  const [lastMsStr, lastSeqStr] = last.id.split("-");
+                  const lastMs = parseInt(lastMsStr, 10);
+                  const lastSeq = parseInt(lastSeqStr, 10);
+
+                  if (ms > lastMs || (ms === lastMs && seq > lastSeq)) {
+                     const newStream = stream ?? [];
+                     newStream.push({ id, fields });
+                     streams.set(key, newStream);
+                     connection.write(bulkString(Buffer.from(id)));
+                  } else {
+                     connection.write(
+                        "-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n"
+                     );
+                  }
                }
             }
          } else if (command === "rpush") {
