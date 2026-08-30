@@ -151,6 +151,15 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          } else if (command === "get") {
             const value = getValue(parsed.args[0].toString());
             connection.write(value === undefined ? "$-1\r\n" : bulkString(value));
+         } else if (command === "type") {
+            const key = parsed.args[0].toString();
+            if (getValue(key) !== undefined) {
+               connection.write("+string\r\n");
+            } else if (lists.has(key)) {
+               connection.write("+list\r\n");
+            } else {
+               connection.write("+none\r\n");
+            }
          } else if (command === "rpush") {
             const key = parsed.args[0].toString();
             const list = lists.get(key) ?? [];
