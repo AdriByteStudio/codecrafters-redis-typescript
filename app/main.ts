@@ -701,3 +701,19 @@ const masterReplid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 const masterReplOffset = 0;
 
 server.listen(port, "127.0.0.1");
+
+// If running as a replica, connect to the master and start the handshake.
+if (role === "slave") {
+   const replicaofIndex = process.argv.indexOf("--replicaof");
+   const [masterHost, masterPort] = process.argv[replicaofIndex + 1].split(" ");
+
+   const masterConnection = net.createConnection({
+      host: masterHost,
+      port: parseInt(masterPort, 10),
+   });
+
+   masterConnection.on("connect", () => {
+      // Step 1: send PING as a RESP array.
+      masterConnection.write("*1\r\n$4\r\nPING\r\n");
+   });
+}
