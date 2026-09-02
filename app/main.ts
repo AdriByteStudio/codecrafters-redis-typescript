@@ -1,4 +1,6 @@
 import * as net from "net";
+import * as fs from "fs";
+import * as path from "path";
 
 // You can use print statements as follows for debugging, they'll be visible when running tests.
 console.log("Logs from your program will appear here!");
@@ -696,6 +698,19 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
    } else if (command === "unwatch") {
       ctx.watchedKeys.clear();
       send("+OK\r\n");
+   } else if (command === "keys") {
+      const pattern = args[0]?.toString();
+      if (pattern === "*") {
+         const keys = [...store.keys()];
+         if (keys.length === 0) {
+            send("*0\r\n");
+         } else {
+            const parts = keys.map((k) => bulkString(Buffer.from(k)));
+            send(Buffer.concat([Buffer.from(`*${keys.length}\r\n`), ...parts]));
+         }
+      } else {
+         send("*0\r\n");
+      }
    } else if (command === "config") {
       const sub = args[0]?.toString().toLowerCase();
       if (sub === "get") {
@@ -856,6 +871,145 @@ const configDbfilename = dbfilenameArgIndex !== -1 ? process.argv[dbfilenameArgI
 
 // Replication ID for the master. The ID is a 40-char pseudo-random string.
 const masterReplid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+
+// ---------- RDB parser ----------
+
+// Read a length-encoded value from buf at offset. Returns [value, newOffset].
+function readLength(buf: Buffer, offset: number): [number, number] {
+   const first = buf[offset];
+   const type = (first >> 6) & 0x03;
+   if (type === 0) {
+      return [first & 0x3f, offset + 1];
+   } else if (type === 1) {
+      const second = buf[offset + 1];
+      return [((first & 0x3f) << 8) | second, offset + 2];
+   } else if (type === 2) {
+      const val = (buf[offset + 1] << 24) | (buf[offset + 2] << 16) | (buf[offset + 3] << 8) | buf[offset + 4];
+      return [val >>> 0, offset + 5];
+   } else {
+      // 0b11 — special string encoding
+      return [first & 0x3f, offset + 1];
+   }
+}
+
+// Read a string-encoded value (length + raw bytes, or integer encoding).
+function readStringEncoded(buf: Buffer, offset: number): [Buffer, number] {
+   const first = buf[offset];
+   const type = (first >> 6) & 0x03;
+   if (type === 0) {
+      const len = first & 0x3f;
+      return [buf.subarray(offset + 1, offset + 1 + len), offset + 1 + len];
+   } else if (type === 1) {
+      const second = buf[offset + 1];
+      const len = ((first & 0x3f) << 8) | second;
+      return [buf.subarray(offset + 2, offset + 2 + len), offset + 2 + len];
+   } else if (type === 2) {
+      const len = (buf[offset + 1] << 24) | (buf[offset + 2] << 16) | (buf[offset + 3] << 8) | buf[offset + 4];
+      return [buf.subarray(offset + 5, offset + 5 + (len >>> 0)), offset + 5 + (len >>> 0)];
+   } else {
+      // Special encodings (0xC0..0xC3)
+      const specialType = first & 0x3f;
+      if (specialType === 0) {
+         // 8-bit integer
+         return [Buffer.from(buf[offset + 1].toString()), offset + 2];
+      } else if (specialType === 1) {
+         // 16-bit integer, little-endian
+         const val = buf[offset + 1] | (buf[offset + 2] << 8);
+         return [Buffer.from(val.toString()), offset + 3];
+      } else if (specialType === 2) {
+         // 32-bit integer, little-endian
+         const val = buf[offset + 1] | (buf[offset + 2] << 8) | (buf[offset + 3] << 16) | (buf[offset + 4] << 24);
+         return [Buffer.from((val >>> 0).toString()), offset + 5];
+      } else {
+         // LZF compressed — skip
+         throw new Error("LZF compressed strings not supported");
+      }
+   }
+}
+
+// Load key-value pairs from an RDB file into the global store.
+function loadRdb(filePath: string): void {
+   if (!fs.existsSync(filePath)) {
+      return; // treat as empty database
+   }
+   const buf = fs.readFileSync(filePath);
+   let offset = 0;
+
+   // 1. Header: "REDIS0011" (9 bytes)
+   offset = 9;
+
+   while (offset < buf.length) {
+      const byte = buf[offset];
+
+      // Metadata subsection (0xFA)
+      if (byte === 0xFA) {
+         offset++;
+         // Skip metadata name (string encoded)
+         [, offset] = readStringEncoded(buf, offset);
+         // Skip metadata value (string encoded)
+         [, offset] = readStringEncoded(buf, offset);
+         continue;
+      }
+
+      // Database subsection (0xFE)
+      if (byte === 0xFE) {
+         offset++;
+         // Skip DB index (size encoded)
+         [, offset] = readLength(buf, offset);
+         continue;
+      }
+
+      // Hash table size info (0xFB)
+      if (byte === 0xFB) {
+         offset++;
+         // Skip hash table size (size encoded)
+         [, offset] = readLength(buf, offset);
+         // Skip expiry hash table size (size encoded)
+         [, offset] = readLength(buf, offset);
+         continue;
+      }
+
+      // End of file (0xFF)
+      if (byte === 0xFF) {
+         break;
+      }
+
+      // Expire in milliseconds (0xFC)
+      let expiresAtMs: number | null = null;
+      if (byte === 0xFC) {
+         offset++;
+         expiresAtMs = Number(buf.readBigUInt64LE(offset));
+         offset += 8;
+      }
+
+      // Expire in seconds (0xFD)
+      let expiresAtSec: number | null = null;
+      if (offset < buf.length && buf[offset] === 0xFD) {
+         offset++;
+         expiresAtSec = buf.readUInt32LE(offset);
+         offset += 4;
+      }
+
+      // Value type flag
+      const valueType = buf[offset];
+      offset++;
+
+      // Key (string encoded)
+      const [key, off1] = readStringEncoded(buf, offset);
+      offset = off1;
+
+      // Value (string encoded for type 0)
+      const [value, off2] = readStringEncoded(buf, offset);
+      offset = off2;
+
+      const expiresAt = expiresAtMs !== null ? expiresAtMs : expiresAtSec !== null ? expiresAtSec * 1000 : null;
+      store.set(key.toString(), { value, expiresAt });
+   }
+}
+
+// Load the RDB file on startup.
+const rdbPath = path.join(configDir, configDbfilename);
+loadRdb(rdbPath);
 
 server.listen(port, "127.0.0.1");
 
