@@ -1029,6 +1029,12 @@ function loadRdb(filePath: string): void {
 const rdbPath = path.join(configDir, configDbfilename);
 loadRdb(rdbPath);
 
+// If AOF persistence is enabled, create the append-only directory at startup.
+if (configAppendonly === "yes") {
+   const appendDir = path.join(configDir, configAppenddirname);
+   fs.mkdirSync(appendDir, { recursive: true });
+}
+
 server.listen(port, "127.0.0.1");
 
 // If running as a replica, connect to the master and start the handshake.
