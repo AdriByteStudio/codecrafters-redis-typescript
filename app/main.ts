@@ -57,6 +57,25 @@ const emptyRdb = Buffer.from(
    "hex"
 );
 
+// Sockets of connected replicas (those that completed the handshake). Write
+// commands are propagated to all of them over their replication connection.
+const replicas = new Set<net.Socket>();
+
+// Encode a command (name + args) as a RESP array and send it to every replica.
+function propagate(command: string, args: Buffer[]): void {
+   if (replicas.size === 0) {
+      return;
+   }
+   const parts: Buffer[] = [Buffer.from(`*${args.length + 1}\r\n`), bulkString(Buffer.from(command))];
+   for (const arg of args) {
+      parts.push(bulkString(arg));
+   }
+   const payload = Buffer.concat(parts);
+   for (const replica of replicas) {
+      replica.write(payload);
+   }
+}
+
 // In-memory key-value store, shared across all connections.
 // Each entry holds the value and an optional expiry timestamp (ms since epoch).
 const store = new Map<string, { value: Buffer; expiresAt: number | null }>();
@@ -263,9 +282,10 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          send("+OK\r\n");
       } else if (command === "psync") {
          // Respond with a full resynchronization using the master's replid,
-         // then send the empty RDB file.
+         // then send the empty RDB file. This connection is now a replica.
          send(`+FULLRESYNC ${masterReplid} 0\r\n`);
          send(Buffer.concat([Buffer.from(`$${emptyRdb.length}\r\n`), emptyRdb]));
+         replicas.add(connection);
       } else if (command === "info") {
          // Only the replication section is needed for now.
          const section = args[0]?.toString().toLowerCase();
@@ -345,6 +365,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          store.set(key, { value, expiresAt });
          writeVersion++;
          keyVersions.set(key, writeVersion);
+         propagate("set", args);
          send("+OK\r\n");
       } else if (command === "get") {
          const value = getValue(args[0].toString());
@@ -361,6 +382,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             store.set(key, { value: Buffer.from(incremented.toString()), expiresAt: null });
             writeVersion++;
             keyVersions.set(key, writeVersion);
+            propagate("incr", args);
             send(`:${incremented}\r\n`);
          }
       } else if (command === "type") {
@@ -424,6 +446,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             streams.set(key, newStream);
             writeVersion++;
             keyVersions.set(key, writeVersion);
+            propagate("xadd", args);
             send(bulkString(Buffer.from(id)));
             serveBlockedXreadClients(key);
          } else {
@@ -437,6 +460,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
                streams.set(key, newStream);
                writeVersion++;
                keyVersions.set(key, writeVersion);
+               propagate("xadd", args);
                send(bulkString(Buffer.from(id)));
                serveBlockedXreadClients(key);
             } else {
@@ -537,6 +561,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          lists.set(key, list);
          writeVersion++;
          keyVersions.set(key, writeVersion);
+         propagate("rpush", args);
          send(`:${list.length}\r\n`);
          while (serveBlockedClient(key)) {
             // Keep serving waiting clients while elements remain.
@@ -550,6 +575,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          lists.set(key, list);
          writeVersion++;
          keyVersions.set(key, writeVersion);
+         propagate("lpush", args);
          send(`:${list.length}\r\n`);
          while (serveBlockedClient(key)) {
             // Keep serving waiting clients while elements remain.
@@ -565,6 +591,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             writeVersion++;
             keyVersions.set(key, writeVersion);
+            propagate("blpop", args);
             send(
                Buffer.concat([Buffer.from("*2\r\n"), bulkString(Buffer.from(key)), bulkString(element)])
             );
@@ -608,6 +635,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             writeVersion++;
             keyVersions.set(key, writeVersion);
+            propagate("lpop", args);
             const parts: Buffer[] = [Buffer.from(`*${removed.length}\r\n`)];
             for (const element of removed) {
                parts.push(bulkString(element));
@@ -620,6 +648,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             writeVersion++;
             keyVersions.set(key, writeVersion);
+            propagate("lpop", args);
             send(bulkString(element));
          }
       } else if (command === "lrange") {
@@ -687,6 +716,9 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
    });
 
    connection.on("close", () => {
+      // Remove this connection from the replica set if it was one.
+      replicas.delete(connection);
+
       // Remove this connection from any BLPOP wait queues.
       for (const [key, queue] of blockedClients) {
          const index = queue.findIndex((e) => e.socket === connection);
