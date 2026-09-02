@@ -1065,23 +1065,70 @@ loadRdb(rdbPath);
 
 // If AOF persistence is enabled, create the append-only directory and the
 // first incremental AOF file at startup, and read the manifest to determine
-// the active incremental file to write to.
+// the active incremental file to write to. If the manifest already exists
+// (e.g. from a previous run), read incremental files and replay their commands
+// to restore the database state.
 if (configAppendonly === "yes") {
    const appendDir = path.join(configDir, configAppenddirname);
    fs.mkdirSync(appendDir, { recursive: true });
-   const incrAofPath = path.join(appendDir, `${configAppendfilename}.1.incr.aof`);
-   fs.writeFileSync(incrAofPath, "");
    const manifestPath = path.join(appendDir, `${configAppendfilename}.manifest`);
-   fs.writeFileSync(manifestPath, `file ${configAppendfilename}.1.incr.aof seq 1 type i\n`);
 
-   // Read the manifest to find the active incremental file (type i).
-   const manifestContent = fs.readFileSync(manifestPath, "utf8");
-   for (const line of manifestContent.split("\n")) {
-      const tokens = line.trim().split(/\s+/);
-      if (tokens.length >= 6 && tokens[0] === "file" && tokens[5] === "i") {
-         activeAofPath = path.join(appendDir, tokens[1]);
-         break;
+   if (fs.existsSync(manifestPath)) {
+      // ---- Replay phase: read existing AOF files listed in the manifest ----
+      const manifestContent = fs.readFileSync(manifestPath, "utf8");
+      const incrAofPaths: string[] = [];
+      for (const line of manifestContent.split("\n")) {
+         const tokens = line.trim().split(/\s+/);
+         // Format: file <name> seq <n> type i
+         if (tokens.length >= 6 && tokens[0] === "file" && tokens[5] === "i") {
+            incrAofPaths.push(path.join(appendDir, tokens[1]));
+         }
       }
+
+      // Replay commands from each incremental AOF file in sequence order.
+      // We reuse the existing RESP parser (parseCommand) which expects a
+      // complete RESP array in the buffer. Each AOF file may contain
+      // multiple commands concatenated together, so we iterate through
+      // the buffer consuming one command at a time.
+      const replayCtx: ExecContext = {
+         connection: null as unknown as net.Socket,
+         send: () => {},
+         inTransaction: false,
+         queuedCommands: [],
+         watchedKeys: new Map(),
+         responseSink: null,
+      };
+
+      for (const aofFilePath of incrAofPaths) {
+         if (!fs.existsSync(aofFilePath)) continue;
+         const aofData = fs.readFileSync(aofFilePath);
+         let offset = 0;
+         while (offset < aofData.length) {
+            const slice = aofData.subarray(offset);
+            const parsed = parseCommand(slice);
+            if (parsed === null) break; // incomplete or no more commands
+            const cmd = parsed.command.toLowerCase();
+            executeCommand(replayCtx, cmd, parsed.args);
+            offset += parsed.consumed;
+         }
+      }
+
+      // ---- Active AOF file setup for new writes ----
+      // Use the last incremental file from the manifest as the active AOF.
+      if (incrAofPaths.length > 0) {
+         activeAofPath = incrAofPaths[incrAofPaths.length - 1];
+      } else {
+         // No incremental files found; create a default one.
+         const defaultIncrPath = path.join(appendDir, `${configAppendfilename}.1.incr.aof`);
+         fs.writeFileSync(defaultIncrPath, "");
+         activeAofPath = defaultIncrPath;
+      }
+   } else {
+      // ---- First run: create the initial AOF file and manifest ----
+      const incrAofPath = path.join(appendDir, `${configAppendfilename}.1.incr.aof`);
+      fs.writeFileSync(incrAofPath, "");
+      fs.writeFileSync(manifestPath, `file ${configAppendfilename}.1.incr.aof seq 1 type i\n`);
+      activeAofPath = incrAofPath;
    }
 }
 
