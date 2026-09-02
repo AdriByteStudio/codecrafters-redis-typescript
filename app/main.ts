@@ -320,7 +320,12 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
    }
 
    if (command === "ping") {
-      send("+PONG\r\n");
+      if (ctx.subscribed) {
+         // In subscribed mode, PING responds with a RESP array ["pong", ""].
+         send(Buffer.concat([Buffer.from("*2\r\n"), bulkString(Buffer.from("pong")), bulkString(Buffer.from(""))]));
+      } else {
+         send("+PONG\r\n");
+      }
    } else if (command === "echo") {
       send(bulkString(args[0]));
    } else if (command === "replconf") {
