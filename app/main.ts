@@ -130,6 +130,10 @@ interface StreamEntry {
 }
 const streams = new Map<string, StreamEntry[]>();
 
+// In-memory sorted set store, shared across all connections. Each member maps
+// to its score (stored as a 64-bit float for precision).
+const sortedSets = new Map<string, Map<string, number>>();
+
 // Global write version counter and per-key version tracking. Every time any
 // key is written, writeVersion increments and that key's entry is updated.
 // On WATCH, the connection snapshots current versions. On EXEC, versions are
@@ -889,6 +893,18 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          }
       }
       send(`:${subs?.size ?? 0}\r\n`);
+   } else if (command === "zadd") {
+      const key = args[0].toString();
+      const score = parseFloat(args[1].toString());
+      const member = args[2].toString();
+      let zset = sortedSets.get(key);
+      if (!zset) {
+         zset = new Map<string, number>();
+         sortedSets.set(key, zset);
+      }
+      const added = zset.has(member) ? 0 : 1;
+      zset.set(member, score);
+      send(`:${added}\r\n`);
    }
 }
 
