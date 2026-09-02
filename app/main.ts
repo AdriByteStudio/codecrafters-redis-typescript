@@ -811,6 +811,7 @@ if (role === "slave") {
    // State for reading the RDB file after FULLRESYNC.
    let rdbRemaining: number | null = null; // bytes of RDB still to consume
    let rdbLength: number | null = null; // declared RDB length
+   let fullresyncReceived = false; // true once we've consumed the +FULLRESYNC line
 
    masterConnection.on("data", (data: Buffer) => {
       masterBuffer = Buffer.concat([masterBuffer, data]);
@@ -850,15 +851,18 @@ if (role === "slave") {
 
       // Read the FULLRESYNC line if we haven't yet.
       if (rdbLength === null) {
-         const lineEnd = masterBuffer.indexOf("\r\n");
-         if (lineEnd === -1) {
-            return;
-         }
-         const line = masterBuffer.subarray(0, lineEnd).toString();
-         masterBuffer = masterBuffer.subarray(lineEnd + 2);
-         if (!line.startsWith("+FULLRESYNC")) {
-            // Unexpected; ignore.
-            return;
+         if (!fullresyncReceived) {
+            const lineEnd = masterBuffer.indexOf("\r\n");
+            if (lineEnd === -1) {
+               return;
+            }
+            const line = masterBuffer.subarray(0, lineEnd).toString();
+            masterBuffer = masterBuffer.subarray(lineEnd + 2);
+            if (!line.startsWith("+FULLRESYNC")) {
+               // Unexpected; ignore.
+               return;
+            }
+            fullresyncReceived = true;
          }
          // Next comes the RDB bulk string header: $<length>\r\n
          const dollar = masterBuffer.indexOf("\r\n");
