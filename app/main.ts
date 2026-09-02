@@ -716,4 +716,33 @@ if (role === "slave") {
       // Step 1: send PING as a RESP array.
       masterConnection.write("*1\r\n$4\r\nPING\r\n");
    });
+
+   // Buffer incoming data from the master to parse RESP responses.
+   let masterBuffer = Buffer.alloc(0);
+   let handshakeStep = 1; // 1 = waiting for PONG, 2 = waiting for first REPLCONF OK, 3 = waiting for second REPLCONF OK
+
+   masterConnection.on("data", (data: Buffer) => {
+      masterBuffer = Buffer.concat([masterBuffer, data]);
+
+      // Wait for a complete simple string response (+...\r\n).
+      const lineEnd = masterBuffer.indexOf("\r\n");
+      if (lineEnd === -1) {
+         return;
+      }
+      const response = masterBuffer.subarray(0, lineEnd).toString();
+      masterBuffer = masterBuffer.subarray(lineEnd + 2);
+
+      if (handshakeStep === 1 && response === "+PONG") {
+         // Step 2a: REPLCONF listening-port <PORT>
+         const portStr = port.toString();
+         masterConnection.write(
+            `*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$${portStr.length}\r\n${portStr}\r\n`
+         );
+         handshakeStep = 2;
+      } else if (handshakeStep === 2 && response === "+OK") {
+         // Step 2b: REPLCONF capa psync2
+         masterConnection.write("*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n");
+         handshakeStep = 3;
+      }
+   });
 }
