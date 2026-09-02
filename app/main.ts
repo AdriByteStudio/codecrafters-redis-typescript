@@ -813,6 +813,10 @@ if (role === "slave") {
    let rdbLength: number | null = null; // declared RDB length
    let fullresyncReceived = false; // true once we've consumed the +FULLRESYNC line
 
+   // Running byte offset of all commands processed from the master. Used in
+   // REPLCONF ACK responses so the master knows how far along the replica is.
+   let replicaOffset = 0;
+
    masterConnection.on("data", (data: Buffer) => {
       masterBuffer = Buffer.concat([masterBuffer, data]);
 
@@ -891,8 +895,6 @@ if (role === "slave") {
       // RDB fully consumed. Process any propagated commands in the buffer.
       // Track the total bytes of every command received from the master so we
       // can report the offset in REPLCONF ACK responses.
-      let replicaOffset = 0;
-
       while (true) {
          const parsed = parseCommand(masterBuffer);
          if (parsed === null) {
