@@ -255,7 +255,13 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          // Only the replication section is needed for now.
          const section = args[0]?.toString().toLowerCase();
          if (section === "replication") {
-            send(bulkString(Buffer.from(`role:${role}`)));
+            send(
+               bulkString(
+                  Buffer.from(
+                     `role:${role}\nmaster_replid:${masterReplid}\nmaster_repl_offset:${masterReplOffset}`
+                  )
+               )
+            );
          } else {
             send(bulkString(Buffer.from("")));
          }
@@ -688,5 +694,10 @@ const port = portArgIndex !== -1 ? parseInt(process.argv[portArgIndex + 1], 10) 
 
 // Determine the server role: master by default, slave if --replicaof is given.
 const role = process.argv.includes("--replicaof") ? "slave" : "master";
+
+// Replication ID and offset for the master. The ID is a 40-char pseudo-random
+// string; the offset starts at 0.
+const masterReplid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+const masterReplOffset = 0;
 
 server.listen(port, "127.0.0.1");
