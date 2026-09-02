@@ -718,10 +718,10 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          const configMap: Record<string, string> = {
             dir: configDir,
             dbfilename: configDbfilename,
-            appendonly: "no",
-            appenddirname: "appendonlydir",
-            appendfilename: "appendonly.aof",
-            appendfsync: "everysec",
+            appendonly: configAppendonly,
+            appenddirname: configAppenddirname,
+            appendfilename: configAppendfilename,
+            appendfsync: configAppendfsync,
          };
          const value = configMap[param] ?? "";
          send(Buffer.concat([Buffer.from("*2\r\n"), bulkString(Buffer.from(param ?? "")), bulkString(Buffer.from(value))]));
@@ -876,6 +876,16 @@ const dirArgIndex = process.argv.indexOf("--dir");
 const configDir = dirArgIndex !== -1 ? process.argv[dirArgIndex + 1] : process.cwd();
 const dbfilenameArgIndex = process.argv.indexOf("--dbfilename");
 const configDbfilename = dbfilenameArgIndex !== -1 ? process.argv[dbfilenameArgIndex + 1] : "dump.rdb";
+
+// AOF configuration parameters (with defaults).
+const appendonlyArgIndex = process.argv.indexOf("--appendonly");
+const configAppendonly = appendonlyArgIndex !== -1 ? process.argv[appendonlyArgIndex + 1] : "no";
+const appenddirnameArgIndex = process.argv.indexOf("--appenddirname");
+const configAppenddirname = appenddirnameArgIndex !== -1 ? process.argv[appenddirnameArgIndex + 1] : "appendonlydir";
+const appendfilenameArgIndex = process.argv.indexOf("--appendfilename");
+const configAppendfilename = appendfilenameArgIndex !== -1 ? process.argv[appendfilenameArgIndex + 1] : "appendonly.aof";
+const appendfsyncArgIndex = process.argv.indexOf("--appendfsync");
+const configAppendfsync = appendfsyncArgIndex !== -1 ? process.argv[appendfsyncArgIndex + 1] : "everysec";
 
 // Replication ID for the master. The ID is a 40-char pseudo-random string.
 const masterReplid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
