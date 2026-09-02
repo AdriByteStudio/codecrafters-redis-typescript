@@ -892,6 +892,14 @@ if (role === "slave") {
          }
          masterBuffer = masterBuffer.subarray(parsed.consumed);
          const command = parsed.command.toLowerCase();
+
+         // The only command the replica responds to is REPLCONF GETACK.
+         if (command === "replconf" && parsed.args[0]?.toString().toLowerCase() === "getack") {
+            // Respond with REPLCONF ACK 0 (offset hardcoded for now).
+            masterConnection.write("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+            continue;
+         }
+
          executeCommand(replicaCtx, command, parsed.args);
       }
    });
