@@ -873,7 +873,7 @@ const role = process.argv.includes("--replicaof") ? "slave" : "master";
 
 // RDB configuration parameters.
 const dirArgIndex = process.argv.indexOf("--dir");
-const configDir = dirArgIndex !== -1 ? process.argv[dirArgIndex + 1] : ".";
+const configDir = dirArgIndex !== -1 ? process.argv[dirArgIndex + 1] : process.cwd();
 const dbfilenameArgIndex = process.argv.indexOf("--dbfilename");
 const configDbfilename = dbfilenameArgIndex !== -1 ? process.argv[dbfilenameArgIndex + 1] : "dump.rdb";
 
