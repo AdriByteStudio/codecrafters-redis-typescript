@@ -889,6 +889,10 @@ if (role === "slave") {
       }
 
       // RDB fully consumed. Process any propagated commands in the buffer.
+      // Track the total bytes of every command received from the master so we
+      // can report the offset in REPLCONF ACK responses.
+      let replicaOffset = 0;
+
       while (true) {
          const parsed = parseCommand(masterBuffer);
          if (parsed === null) {
@@ -898,13 +902,17 @@ if (role === "slave") {
          const command = parsed.command.toLowerCase();
 
          // The only command the replica responds to is REPLCONF GETACK.
+         // Reply with the current offset (which does NOT include this GETACK
+         // command), then add this command's bytes to the running total.
          if (command === "replconf" && parsed.args[0]?.toString().toLowerCase() === "getack") {
-            // Respond with REPLCONF ACK 0 (offset hardcoded for now).
-            masterConnection.write("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n");
+            const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${replicaOffset.toString().length}\r\n${replicaOffset}\r\n`;
+            masterConnection.write(ackResp);
+            replicaOffset += parsed.consumed;
             continue;
          }
 
          executeCommand(replicaCtx, command, parsed.args);
+         replicaOffset += parsed.consumed;
       }
    });
 }
