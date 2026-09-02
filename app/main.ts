@@ -963,6 +963,19 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          return;
       }
       send(bulkString(Buffer.from(score.toString())));
+   } else if (command === "zrem") {
+      const key = args[0].toString();
+      const member = args[1].toString();
+      const zset = sortedSets.get(key);
+      if (!zset) {
+         send(":0\r\n");
+         return;
+      }
+      const removed = zset.delete(member) ? 1 : 0;
+      if (zset.size === 0) {
+         sortedSets.delete(key);
+      }
+      send(`:${removed}\r\n`);
    }
 }
 
