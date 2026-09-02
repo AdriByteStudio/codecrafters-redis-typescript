@@ -949,6 +949,10 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          parts.push(bulkString(Buffer.from(m)));
       }
       send(Buffer.concat(parts));
+   } else if (command === "zcard") {
+      const key = args[0].toString();
+      const zset = sortedSets.get(key);
+      send(`:${zset?.size ?? 0}\r\n`);
    }
 }
 
