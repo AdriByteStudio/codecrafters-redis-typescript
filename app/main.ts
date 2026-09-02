@@ -300,6 +300,7 @@ interface ExecContext {
    watchedKeys: Map<string, number>;
    responseSink: Buffer[] | null;
    subscriptions: Set<string>;
+   subscribed: boolean;
 }
 
 // Executes a single command against the shared stores. `ctx.send` is used to
@@ -307,6 +308,17 @@ interface ExecContext {
 // no-op so nothing is written back to the master.
 function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void {
    const { connection, send } = ctx;
+
+   // In subscribed mode, only a subset of commands is allowed. Reject any
+   // other command with an error. (PING is allowed but handled separately.)
+   if (ctx.subscribed) {
+      const allowed = new Set(["subscribe", "unsubscribe", "psubscribe", "punsubscribe", "ping", "quit"]);
+      if (!allowed.has(command)) {
+         send(`-ERR Can't execute '${command}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n`);
+         return;
+      }
+   }
+
    if (command === "ping") {
       send("+PONG\r\n");
    } else if (command === "echo") {
@@ -816,6 +828,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
    } else if (command === "subscribe") {
       const channel = args[0].toString();
       ctx.subscriptions.add(channel);
+      ctx.subscribed = true;
       const count = ctx.subscriptions.size;
       const resp = Buffer.concat([
          Buffer.from(`*3\r\n`),
@@ -847,6 +860,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
       watchedKeys: new Map<string, number>(),
       responseSink: null,
       subscriptions: new Set(),
+      subscribed: false,
    };
 
    connection.on("data", (data: Buffer) => {
@@ -1111,6 +1125,7 @@ if (configAppendonly === "yes") {
          watchedKeys: new Map(),
          responseSink: null,
          subscriptions: new Set(),
+         subscribed: false,
       };
 
       for (const aofFilePath of incrAofPaths) {
@@ -1180,6 +1195,7 @@ if (role === "slave") {
       watchedKeys: new Map<string, number>(),
       responseSink: null,
       subscriptions: new Set(),
+      subscribed: false,
    };
 
    // State for reading the RDB file after FULLRESYNC.
