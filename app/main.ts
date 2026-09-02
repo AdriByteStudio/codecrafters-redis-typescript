@@ -1029,10 +1029,13 @@ function loadRdb(filePath: string): void {
 const rdbPath = path.join(configDir, configDbfilename);
 loadRdb(rdbPath);
 
-// If AOF persistence is enabled, create the append-only directory at startup.
+// If AOF persistence is enabled, create the append-only directory and the
+// first incremental AOF file at startup.
 if (configAppendonly === "yes") {
    const appendDir = path.join(configDir, configAppenddirname);
    fs.mkdirSync(appendDir, { recursive: true });
+   const incrAofPath = path.join(appendDir, `${configAppendfilename}.1.incr.aof`);
+   fs.writeFileSync(incrAofPath, "");
 }
 
 server.listen(port, "127.0.0.1");
