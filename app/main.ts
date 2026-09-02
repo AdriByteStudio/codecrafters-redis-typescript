@@ -852,7 +852,20 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       send(resp);
    } else if (command === "publish") {
       const channel = args[0].toString();
+      const message = args[1];
       const subs = channelSubscribers.get(channel);
+      // Deliver the message to every subscribed client.
+      if (subs) {
+         const payload = Buffer.concat([
+            Buffer.from("*3\r\n"),
+            bulkString(Buffer.from("message")),
+            bulkString(Buffer.from(channel)),
+            bulkString(message),
+         ]);
+         for (const sub of subs) {
+            sub.write(payload);
+         }
+      }
       send(`:${subs?.size ?? 0}\r\n`);
    }
 }
