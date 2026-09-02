@@ -976,6 +976,10 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          sortedSets.delete(key);
       }
       send(`:${removed}\r\n`);
+   } else if (command === "geoadd") {
+      // GEOADD key longitude latitude member
+      // In this stage, only respond with the count of elements added (1).
+      send(":1\r\n");
    }
 }
 
