@@ -65,10 +65,12 @@ interface StreamEntry {
 }
 const streams = new Map<string, StreamEntry[]>();
 
-// Global set of keys that have been modified since the last WATCH-check.
-// When any client writes to a key, it's added here. On EXEC, the server
-// intersects this with the connection's watchedKeys to decide whether to abort.
-const dirtyKeys = new Set<string>();
+// Global write version counter and per-key version tracking. Every time any
+// key is written, writeVersion increments and that key's entry is updated.
+// On WATCH, the connection snapshots current versions. On EXEC, versions are
+// compared to detect writes that happened between WATCH and EXEC.
+let writeVersion = 0;
+const keyVersions = new Map<string, number>();
 
 // Clients blocked on BLPOP, keyed by list name. Each queue is FIFO so the
 // client that has been waiting the longest is served first. Each entry also
@@ -230,7 +232,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
    let buffer = Buffer.alloc(0);
    let inTransaction = false;
    const queuedCommands: { command: string; args: Buffer[] }[] = [];
-   const watchedKeys = new Set<string>();
+   const watchedKeys = new Map<string, number>(); // key -> version at WATCH time
 
    // When set, command replies are collected here (used while replaying a
    // transaction's queued commands) instead of being written to the socket.
@@ -257,11 +259,12 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             send("-ERR EXEC without MULTI\r\n");
          } else {
             inTransaction = false;
-            // Check if any watched key was modified by another client.
+            // Check if any watched key was modified since WATCH.
             let aborted = false;
             if (watchedKeys.size > 0) {
-               for (const key of watchedKeys) {
-                  if (dirtyKeys.has(key)) {
+               for (const [key, versionAtWatch] of watchedKeys) {
+                  const currentVersion = keyVersions.get(key) ?? 0;
+                  if (currentVersion !== versionAtWatch) {
                      aborted = true;
                      break;
                   }
@@ -269,7 +272,6 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             // Clear watch state regardless of outcome.
             watchedKeys.clear();
-            dirtyKeys.clear();
             if (aborted) {
                queuedCommands.length = 0;
                send("*-1\r\n");
@@ -312,7 +314,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          }
 
          store.set(key, { value, expiresAt });
-         dirtyKeys.add(key);
+         writeVersion++;
+         keyVersions.set(key, writeVersion);
          send("+OK\r\n");
       } else if (command === "get") {
          const value = getValue(args[0].toString());
@@ -327,7 +330,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          } else {
             const incremented = current + 1;
             store.set(key, { value: Buffer.from(incremented.toString()), expiresAt: null });
-            dirtyKeys.add(key);
+            writeVersion++;
+            keyVersions.set(key, writeVersion);
             send(`:${incremented}\r\n`);
          }
       } else if (command === "type") {
@@ -389,7 +393,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             const newStream = stream ?? [];
             newStream.push({ id, fields });
             streams.set(key, newStream);
-            dirtyKeys.add(key);
+            writeVersion++;
+            keyVersions.set(key, writeVersion);
             send(bulkString(Buffer.from(id)));
             serveBlockedXreadClients(key);
          } else {
@@ -401,7 +406,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
                const newStream = stream ?? [];
                newStream.push({ id, fields });
                streams.set(key, newStream);
-               dirtyKeys.add(key);
+               writeVersion++;
+               keyVersions.set(key, writeVersion);
                send(bulkString(Buffer.from(id)));
                serveBlockedXreadClients(key);
             } else {
@@ -500,7 +506,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             list.push(element);
          }
          lists.set(key, list);
-         dirtyKeys.add(key);
+         writeVersion++;
+         keyVersions.set(key, writeVersion);
          send(`:${list.length}\r\n`);
          while (serveBlockedClient(key)) {
             // Keep serving waiting clients while elements remain.
@@ -512,7 +519,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             list.unshift(element);
          }
          lists.set(key, list);
-         dirtyKeys.add(key);
+         writeVersion++;
+         keyVersions.set(key, writeVersion);
          send(`:${list.length}\r\n`);
          while (serveBlockedClient(key)) {
             // Keep serving waiting clients while elements remain.
@@ -526,6 +534,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             if (list.length === 0) {
                lists.delete(key);
             }
+            writeVersion++;
+            keyVersions.set(key, writeVersion);
             send(
                Buffer.concat([Buffer.from("*2\r\n"), bulkString(Buffer.from(key)), bulkString(element)])
             );
@@ -567,6 +577,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             if (list.length === 0) {
                lists.delete(key);
             }
+            writeVersion++;
+            keyVersions.set(key, writeVersion);
             const parts: Buffer[] = [Buffer.from(`*${removed.length}\r\n`)];
             for (const element of removed) {
                parts.push(bulkString(element));
@@ -577,6 +589,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             if (list.length === 0) {
                lists.delete(key);
             }
+            writeVersion++;
+            keyVersions.set(key, writeVersion);
             send(bulkString(element));
          }
       } else if (command === "lrange") {
@@ -610,7 +624,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             send("-ERR WATCH inside MULTI is not allowed\r\n");
          } else {
             for (const arg of args) {
-               watchedKeys.add(arg.toString());
+               const key = arg.toString();
+               watchedKeys.set(key, keyVersions.get(key) ?? 0);
             }
             send("+OK\r\n");
          }
