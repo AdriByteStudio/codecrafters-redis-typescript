@@ -65,6 +65,11 @@ interface StreamEntry {
 }
 const streams = new Map<string, StreamEntry[]>();
 
+// Global set of keys that have been modified since the last WATCH-check.
+// When any client writes to a key, it's added here. On EXEC, the server
+// intersects this with the connection's watchedKeys to decide whether to abort.
+const dirtyKeys = new Set<string>();
+
 // Clients blocked on BLPOP, keyed by list name. Each queue is FIFO so the
 // client that has been waiting the longest is served first. Each entry also
 // holds the timeout timer so it can be cleared when the client is served.
@@ -252,16 +257,34 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             send("-ERR EXEC without MULTI\r\n");
          } else {
             inTransaction = false;
-            const queued = queuedCommands.splice(0, queuedCommands.length);
-            const results: Buffer[] = [];
-            for (const queuedCommand of queued) {
-               const previousSink = responseSink;
-               responseSink = [];
-               executeCommand(queuedCommand.command, queuedCommand.args);
-               results.push(...responseSink);
-               responseSink = previousSink;
+            // Check if any watched key was modified by another client.
+            let aborted = false;
+            if (watchedKeys.size > 0) {
+               for (const key of watchedKeys) {
+                  if (dirtyKeys.has(key)) {
+                     aborted = true;
+                     break;
+                  }
+               }
             }
-            send(Buffer.concat([Buffer.from(`*${queued.length}\r\n`), ...results]));
+            // Clear watch state regardless of outcome.
+            watchedKeys.clear();
+            dirtyKeys.clear();
+            if (aborted) {
+               queuedCommands.length = 0;
+               send("*-1\r\n");
+            } else {
+               const queued = queuedCommands.splice(0, queuedCommands.length);
+               const results: Buffer[] = [];
+               for (const queuedCommand of queued) {
+                  const previousSink = responseSink;
+                  responseSink = [];
+                  executeCommand(queuedCommand.command, queuedCommand.args);
+                  results.push(...responseSink);
+                  responseSink = previousSink;
+               }
+               send(Buffer.concat([Buffer.from(`*${queued.length}\r\n`), ...results]));
+            }
          }
       } else if (command === "discard") {
          if (!inTransaction) {
@@ -269,6 +292,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          } else {
             inTransaction = false;
             queuedCommands.length = 0;
+            watchedKeys.clear();
             send("+OK\r\n");
          }
       } else if (command === "set") {
@@ -288,6 +312,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          }
 
          store.set(key, { value, expiresAt });
+         dirtyKeys.add(key);
          send("+OK\r\n");
       } else if (command === "get") {
          const value = getValue(args[0].toString());
@@ -302,6 +327,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          } else {
             const incremented = current + 1;
             store.set(key, { value: Buffer.from(incremented.toString()), expiresAt: null });
+            dirtyKeys.add(key);
             send(`:${incremented}\r\n`);
          }
       } else if (command === "type") {
@@ -363,6 +389,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             const newStream = stream ?? [];
             newStream.push({ id, fields });
             streams.set(key, newStream);
+            dirtyKeys.add(key);
             send(bulkString(Buffer.from(id)));
             serveBlockedXreadClients(key);
          } else {
@@ -374,6 +401,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
                const newStream = stream ?? [];
                newStream.push({ id, fields });
                streams.set(key, newStream);
+               dirtyKeys.add(key);
                send(bulkString(Buffer.from(id)));
                serveBlockedXreadClients(key);
             } else {
@@ -472,6 +500,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             list.push(element);
          }
          lists.set(key, list);
+         dirtyKeys.add(key);
          send(`:${list.length}\r\n`);
          while (serveBlockedClient(key)) {
             // Keep serving waiting clients while elements remain.
@@ -483,6 +512,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             list.unshift(element);
          }
          lists.set(key, list);
+         dirtyKeys.add(key);
          send(`:${list.length}\r\n`);
          while (serveBlockedClient(key)) {
             // Keep serving waiting clients while elements remain.
