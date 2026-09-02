@@ -629,6 +629,9 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             }
             send("+OK\r\n");
          }
+      } else if (command === "unwatch") {
+         watchedKeys.clear();
+         send("+OK\r\n");
       }
    }
 
@@ -644,7 +647,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          buffer = buffer.subarray(parsed.consumed);
          const command = parsed.command.toLowerCase();
 
-         if (inTransaction && command !== "multi" && command !== "exec" && command !== "discard" && command !== "watch") {
+         if (inTransaction && command !== "multi" && command !== "exec" && command !== "discard" && command !== "watch" && command !== "unwatch") {
             queuedCommands.push({ command, args: parsed.args });
             connection.write("+QUEUED\r\n");
             continue;
