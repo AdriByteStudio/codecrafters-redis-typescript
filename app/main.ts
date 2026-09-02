@@ -817,12 +817,13 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       const channel = args[0].toString();
       ctx.subscriptions.add(channel);
       const count = ctx.subscriptions.size;
-      const resp = [
+      const resp = Buffer.concat([
+         Buffer.from(`*3\r\n`),
          bulkString(Buffer.from("subscribe")),
          bulkString(Buffer.from(channel)),
-         `:${count}\r\n`,
-      ];
-      send(Buffer.concat(resp.map((s) => (typeof s === "string" ? Buffer.from(s) : s))));
+         Buffer.from(`:${count}\r\n`),
+      ]);
+      send(resp);
    }
 }
 
