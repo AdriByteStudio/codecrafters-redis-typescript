@@ -978,6 +978,18 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       send(`:${removed}\r\n`);
    } else if (command === "geoadd") {
       // GEOADD key longitude latitude member
+      const longitude = parseFloat(args[1].toString());
+      const latitude = parseFloat(args[2].toString());
+      // Validate longitude: -180 to +180 inclusive.
+      if (longitude < -180 || longitude > 180) {
+         send(`-ERR invalid longitude,latitude pair ${longitude},${latitude}\r\n`);
+         return;
+      }
+      // Validate latitude: -85.05112878 to +85.05112878 inclusive.
+      if (latitude < -85.05112878 || latitude > 85.05112878) {
+         send(`-ERR invalid longitude,latitude pair ${longitude},${latitude}\r\n`);
+         return;
+      }
       // In this stage, only respond with the count of elements added (1).
       send(":1\r\n");
    }
