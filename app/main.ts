@@ -61,7 +61,14 @@ const emptyRdb = Buffer.from(
 // commands are propagated to all of them over their replication connection.
 const replicas = new Set<net.Socket>();
 
+// Track the per-replica ACK offset (the last REPLCONF ACK offset received).
+const replicaAckOffset = new Map<net.Socket, number>();
+
+// Master's replication offset: total bytes of all commands propagated to replicas.
+let masterReplOffset = 0;
+
 // Encode a command (name + args) as a RESP array and send it to every replica.
+// Also advances the master's replication offset by the total payload size.
 function propagate(command: string, args: Buffer[]): void {
    if (replicas.size === 0) {
       return;
@@ -71,6 +78,7 @@ function propagate(command: string, args: Buffer[]): void {
       parts.push(bulkString(arg));
    }
    const payload = Buffer.concat(parts);
+   masterReplOffset += payload.length;
    for (const replica of replicas) {
       replica.write(payload);
    }
@@ -689,10 +697,55 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       ctx.watchedKeys.clear();
       send("+OK\r\n");
    } else if (command === "wait") {
-      // For now, always return the number of connected replicas.
-      // The client may request `numreplicas` with a `timeout`, but we
-      // don't yet wait for acks — we just report the current replica count.
-      send(`:${replicas.size}\r\n`);
+      const numReplicas = parseInt(args[0].toString(), 10);
+      const timeout = parseInt(args[1].toString(), 10);
+
+      // If no replicas are connected, return 0 immediately.
+      if (replicas.size === 0) {
+         send(":0\r\n");
+         return;
+      }
+
+      // If no write commands have been propagated since the last WAIT (i.e.
+      // masterReplOffset is 0), all replicas are trivially in sync.
+      if (masterReplOffset === 0) {
+         send(`:${replicas.size}\r\n`);
+         return;
+      }
+
+      // Send REPLCONF GETACK * to every connected replica.
+      const getack = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
+      for (const replica of replicas) {
+         replica.write(getack);
+      }
+
+      // Count how many replicas have acknowledged up to the current offset.
+      const countAcked = (): number => {
+         let n = 0;
+         for (const replica of replicas) {
+            const acked = replicaAckOffset.get(replica) ?? 0;
+            if (acked >= masterReplOffset) {
+               n++;
+            }
+         }
+         return n;
+      };
+
+      // If timeout is 0, return immediately.
+      if (timeout === 0) {
+         send(`:${countAcked()}\r\n`);
+         return;
+      }
+
+      // Poll every 10ms until we have enough acks or the timeout expires.
+      const start = Date.now();
+      const timer = setInterval(() => {
+         const acked = countAcked();
+         if (acked >= numReplicas || Date.now() - start >= timeout) {
+            clearInterval(timer);
+            send(`:${acked}\r\n`);
+         }
+      }, 10);
    }
 }
 
@@ -729,6 +782,18 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          buffer = buffer.subarray(parsed.consumed);
          const command = parsed.command.toLowerCase();
 
+         // A replica may send REPLCONF ACK <offset> at any time after the
+         // handshake. Record the offset and don't process it as a command.
+         if (
+            command === "replconf" &&
+            parsed.args[0]?.toString().toLowerCase() === "ack" &&
+            replicas.has(connection)
+         ) {
+            const offset = parseInt(parsed.args[1]?.toString() ?? "0", 10);
+            replicaAckOffset.set(connection, offset);
+            continue;
+         }
+
          if (
             ctx.inTransaction &&
             command !== "multi" &&
@@ -749,6 +814,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
    connection.on("close", () => {
       // Remove this connection from the replica set if it was one.
       replicas.delete(connection);
+      replicaAckOffset.delete(connection);
 
       // Remove this connection from any BLPOP wait queues.
       for (const [key, queue] of blockedClients) {
@@ -773,10 +839,8 @@ const port = portArgIndex !== -1 ? parseInt(process.argv[portArgIndex + 1], 10) 
 // Determine the server role: master by default, slave if --replicaof is given.
 const role = process.argv.includes("--replicaof") ? "slave" : "master";
 
-// Replication ID and offset for the master. The ID is a 40-char pseudo-random
-// string; the offset starts at 0.
+// Replication ID for the master. The ID is a 40-char pseudo-random string.
 const masterReplid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
-const masterReplOffset = 0;
 
 server.listen(port, "127.0.0.1");
 
