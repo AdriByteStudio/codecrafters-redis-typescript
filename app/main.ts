@@ -299,6 +299,7 @@ interface ExecContext {
    queuedCommands: { command: string; args: Buffer[] }[];
    watchedKeys: Map<string, number>;
    responseSink: Buffer[] | null;
+   subscriptions: Set<string>;
 }
 
 // Executes a single command against the shared stores. `ctx.send` is used to
@@ -812,6 +813,16 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
             send(`:${acked}\r\n`);
          }
       }, 10);
+   } else if (command === "subscribe") {
+      const channel = args[0].toString();
+      ctx.subscriptions.add(channel);
+      const count = ctx.subscriptions.size;
+      const resp = [
+         bulkString(Buffer.from("subscribe")),
+         bulkString(Buffer.from(channel)),
+         `:${count}\r\n`,
+      ];
+      send(Buffer.concat(resp.map((s) => (typeof s === "string" ? Buffer.from(s) : s))));
    }
 }
 
@@ -834,6 +845,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
       queuedCommands: [],
       watchedKeys: new Map<string, number>(),
       responseSink: null,
+      subscriptions: new Set(),
    };
 
    connection.on("data", (data: Buffer) => {
@@ -1097,6 +1109,7 @@ if (configAppendonly === "yes") {
          queuedCommands: [],
          watchedKeys: new Map(),
          responseSink: null,
+         subscriptions: new Set(),
       };
 
       for (const aofFilePath of incrAofPaths) {
@@ -1165,6 +1178,7 @@ if (role === "slave") {
       queuedCommands: [],
       watchedKeys: new Map<string, number>(),
       responseSink: null,
+      subscriptions: new Set(),
    };
 
    // State for reading the RDB file after FULLRESYNC.
