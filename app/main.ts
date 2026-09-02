@@ -953,6 +953,16 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       const key = args[0].toString();
       const zset = sortedSets.get(key);
       send(`:${zset?.size ?? 0}\r\n`);
+   } else if (command === "zscore") {
+      const key = args[0].toString();
+      const member = args[1].toString();
+      const zset = sortedSets.get(key);
+      const score = zset?.get(member);
+      if (score === undefined) {
+         send("$-1\r\n");
+         return;
+      }
+      send(bulkString(Buffer.from(score.toString())));
    }
 }
 
