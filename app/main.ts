@@ -696,6 +696,15 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
    } else if (command === "unwatch") {
       ctx.watchedKeys.clear();
       send("+OK\r\n");
+   } else if (command === "config") {
+      const sub = args[0]?.toString().toLowerCase();
+      if (sub === "get") {
+         const param = args[1]?.toString().toLowerCase();
+         const value = param === "dir" ? configDir : param === "dbfilename" ? configDbfilename : "";
+         send(Buffer.concat([Buffer.from("*2\r\n"), bulkString(Buffer.from(param ?? "")), bulkString(Buffer.from(value))]));
+      } else {
+         send("*0\r\n");
+      }
    } else if (command === "wait") {
       const numReplicas = parseInt(args[0].toString(), 10);
       const timeout = parseInt(args[1].toString(), 10);
@@ -838,6 +847,12 @@ const port = portArgIndex !== -1 ? parseInt(process.argv[portArgIndex + 1], 10) 
 
 // Determine the server role: master by default, slave if --replicaof is given.
 const role = process.argv.includes("--replicaof") ? "slave" : "master";
+
+// RDB configuration parameters.
+const dirArgIndex = process.argv.indexOf("--dir");
+const configDir = dirArgIndex !== -1 ? process.argv[dirArgIndex + 1] : ".";
+const dbfilenameArgIndex = process.argv.indexOf("--dbfilename");
+const configDbfilename = dbfilenameArgIndex !== -1 ? process.argv[dbfilenameArgIndex + 1] : "dump.rdb";
 
 // Replication ID for the master. The ID is a 40-char pseudo-random string.
 const masterReplid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
