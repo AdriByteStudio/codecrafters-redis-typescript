@@ -922,10 +922,10 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       send(`:${rank}\r\n`);
    } else if (command === "zrange") {
       const key = args[0].toString();
-      const start = parseInt(args[1].toString(), 10);
-      const stop = parseInt(args[2].toString(), 10);
+      let start = parseInt(args[1].toString(), 10);
+      let stop = parseInt(args[2].toString(), 10);
       const zset = sortedSets.get(key);
-      if (!zset || start > stop) {
+      if (!zset) {
          send("*0\r\n");
          return;
       }
@@ -934,11 +934,15 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          if (a[1] !== b[1]) return a[1] - b[1];
          return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
       });
-      if (start >= sorted.length) {
+      const len = sorted.length;
+      // Resolve negative indexes relative to the end of the sorted set.
+      if (start < 0) start = Math.max(len + start, 0);
+      if (stop < 0) stop = len + stop;
+      if (start >= len || start > stop) {
          send("*0\r\n");
          return;
       }
-      const end = Math.min(stop, sorted.length - 1);
+      const end = Math.min(stop, len - 1);
       const selected = sorted.slice(start, end + 1).map(([m]) => m);
       const parts: Buffer[] = [Buffer.from(`*${selected.length}\r\n`)];
       for (const m of selected) {
