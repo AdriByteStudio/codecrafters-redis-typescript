@@ -688,6 +688,11 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
    } else if (command === "unwatch") {
       ctx.watchedKeys.clear();
       send("+OK\r\n");
+   } else if (command === "wait") {
+      // For now, always return the number of connected replicas.
+      // The client may request `numreplicas` with a `timeout`, but we
+      // don't yet wait for acks — we just report the current replica count.
+      send(`:${replicas.size}\r\n`);
    }
 }
 
