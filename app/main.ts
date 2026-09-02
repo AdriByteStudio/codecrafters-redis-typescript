@@ -251,6 +251,15 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          send("+PONG\r\n");
       } else if (command === "echo") {
          send(bulkString(args[0]));
+      } else if (command === "info") {
+         // Only the replication section is needed for now. The server always
+         // starts as a master.
+         const section = args[0]?.toString().toLowerCase();
+         if (section === "replication") {
+            send(bulkString(Buffer.from("role:master")));
+         } else {
+            send(bulkString(Buffer.from("")));
+         }
       } else if (command === "multi") {
          inTransaction = true;
          send("+OK\r\n");
