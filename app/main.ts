@@ -905,6 +905,21 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       const added = zset.has(member) ? 0 : 1;
       zset.set(member, score);
       send(`:${added}\r\n`);
+   } else if (command === "zrank") {
+      const key = args[0].toString();
+      const member = args[1].toString();
+      const zset = sortedSets.get(key);
+      if (!zset || !zset.has(member)) {
+         send("$-1\r\n");
+         return;
+      }
+      // Sort members by score ascending, then lexicographically for ties.
+      const sorted = [...zset.entries()].sort((a, b) => {
+         if (a[1] !== b[1]) return a[1] - b[1];
+         return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+      });
+      const rank = sorted.findIndex(([m]) => m === member);
+      send(`:${rank}\r\n`);
    }
 }
 
