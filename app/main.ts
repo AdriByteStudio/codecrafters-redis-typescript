@@ -674,4 +674,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
    });
 });
 
-server.listen(6379, "127.0.0.1");
+// Parse the --port flag (defaults to 6379).
+const portArgIndex = process.argv.indexOf("--port");
+const port = portArgIndex !== -1 ? parseInt(process.argv[portArgIndex + 1], 10) : 6379;
+
+server.listen(port, "127.0.0.1");
