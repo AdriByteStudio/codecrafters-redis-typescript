@@ -96,7 +96,9 @@ function appendToAof(command: string, args: Buffer[]): void {
    if (activeAofPath === null) {
       return;
    }
-   const parts: Buffer[] = [Buffer.from(`*${args.length + 1}\r\n`), bulkString(Buffer.from(command))];
+   // Redis writes commands in uppercase in the AOF file.
+   const cmd = command.toUpperCase();
+   const parts: Buffer[] = [Buffer.from(`*${args.length + 1}\r\n`), bulkString(Buffer.from(cmd))];
    for (const arg of args) {
       parts.push(bulkString(arg));
    }
