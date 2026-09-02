@@ -1036,6 +1036,8 @@ if (configAppendonly === "yes") {
    fs.mkdirSync(appendDir, { recursive: true });
    const incrAofPath = path.join(appendDir, `${configAppendfilename}.1.incr.aof`);
    fs.writeFileSync(incrAofPath, "");
+   const manifestPath = path.join(appendDir, `${configAppendfilename}.manifest`);
+   fs.writeFileSync(manifestPath, `file ${configAppendfilename}.1.incr.aof seq 1 type i\n`);
 }
 
 server.listen(port, "127.0.0.1");
