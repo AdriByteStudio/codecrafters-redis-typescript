@@ -252,11 +252,10 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
       } else if (command === "echo") {
          send(bulkString(args[0]));
       } else if (command === "info") {
-         // Only the replication section is needed for now. The server always
-         // starts as a master.
+         // Only the replication section is needed for now.
          const section = args[0]?.toString().toLowerCase();
          if (section === "replication") {
-            send(bulkString(Buffer.from("role:master")));
+            send(bulkString(Buffer.from(`role:${role}`)));
          } else {
             send(bulkString(Buffer.from("")));
          }
@@ -686,5 +685,8 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
 // Parse the --port flag (defaults to 6379).
 const portArgIndex = process.argv.indexOf("--port");
 const port = portArgIndex !== -1 ? parseInt(process.argv[portArgIndex + 1], 10) : 6379;
+
+// Determine the server role: master by default, slave if --replicaof is given.
+const role = process.argv.includes("--replicaof") ? "slave" : "master";
 
 server.listen(port, "127.0.0.1");
