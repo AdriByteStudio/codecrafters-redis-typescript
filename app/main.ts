@@ -850,6 +850,28 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          Buffer.from(`:${count}\r\n`),
       ]);
       send(resp);
+   } else if (command === "unsubscribe") {
+      // Unsubscribe from the given channel (or all channels if none given).
+      const channels = args.length > 0 ? args.map((a) => a.toString()) : [...ctx.subscriptions];
+      for (const channel of channels) {
+         ctx.subscriptions.delete(channel);
+         // Remove this connection from the global channel subscriber set.
+         const subs = channelSubscribers.get(channel);
+         if (subs) {
+            subs.delete(connection);
+            if (subs.size === 0) {
+               channelSubscribers.delete(channel);
+            }
+         }
+         const count = ctx.subscriptions.size;
+         const resp = Buffer.concat([
+            Buffer.from(`*3\r\n`),
+            bulkString(Buffer.from("unsubscribe")),
+            bulkString(Buffer.from(channel)),
+            Buffer.from(`:${count}\r\n`),
+         ]);
+         send(resp);
+      }
    } else if (command === "publish") {
       const channel = args[0].toString();
       const message = args[1];
