@@ -86,6 +86,29 @@ function propagate(command: string, args: Buffer[]): void {
    }
 }
 
+// Path to the active incremental AOF file (set at startup when AOF is enabled).
+let activeAofPath: string | null = null;
+
+// Append a write command to the active AOF file in RESP format. When
+// appendfsync is "always", flush to disk before returning so the write is
+// durable before the client receives a response.
+function appendToAof(command: string, args: Buffer[]): void {
+   if (activeAofPath === null) {
+      return;
+   }
+   const parts: Buffer[] = [Buffer.from(`*${args.length + 1}\r\n`), bulkString(Buffer.from(command))];
+   for (const arg of args) {
+      parts.push(bulkString(arg));
+   }
+   const payload = Buffer.concat(parts);
+   const fd = fs.openSync(activeAofPath, "a");
+   fs.writeSync(fd, payload);
+   if (configAppendfsync === "always") {
+      fs.fsyncSync(fd);
+   }
+   fs.closeSync(fd);
+}
+
 // In-memory key-value store, shared across all connections.
 // Each entry holds the value and an optional expiry timestamp (ms since epoch).
 const store = new Map<string, { value: Buffer; expiresAt: number | null }>();
@@ -374,6 +397,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       writeVersion++;
       keyVersions.set(key, writeVersion);
       propagate("set", args);
+      appendToAof("set", args);
       send("+OK\r\n");
    } else if (command === "get") {
       const value = getValue(args[0].toString());
@@ -391,6 +415,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          writeVersion++;
          keyVersions.set(key, writeVersion);
          propagate("incr", args);
+         appendToAof("incr", args);
          send(`:${incremented}\r\n`);
       }
    } else if (command === "type") {
@@ -455,6 +480,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          writeVersion++;
          keyVersions.set(key, writeVersion);
          propagate("xadd", args);
+         appendToAof("xadd", args);
          send(bulkString(Buffer.from(id)));
          serveBlockedXreadClients(key);
       } else {
@@ -469,6 +495,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
             writeVersion++;
             keyVersions.set(key, writeVersion);
             propagate("xadd", args);
+            appendToAof("xadd", args);
             send(bulkString(Buffer.from(id)));
             serveBlockedXreadClients(key);
          } else {
@@ -570,6 +597,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       writeVersion++;
       keyVersions.set(key, writeVersion);
       propagate("rpush", args);
+      appendToAof("rpush", args);
       send(`:${list.length}\r\n`);
       while (serveBlockedClient(key)) {
          // Keep serving waiting clients while elements remain.
@@ -584,6 +612,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       writeVersion++;
       keyVersions.set(key, writeVersion);
       propagate("lpush", args);
+      appendToAof("lpush", args);
       send(`:${list.length}\r\n`);
       while (serveBlockedClient(key)) {
          // Keep serving waiting clients while elements remain.
@@ -600,6 +629,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          writeVersion++;
          keyVersions.set(key, writeVersion);
          propagate("blpop", args);
+         appendToAof("blpop", args);
          send(
             Buffer.concat([Buffer.from("*2\r\n"), bulkString(Buffer.from(key)), bulkString(element)])
          );
@@ -644,6 +674,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          writeVersion++;
          keyVersions.set(key, writeVersion);
          propagate("lpop", args);
+         appendToAof("lpop", args);
          const parts: Buffer[] = [Buffer.from(`*${removed.length}\r\n`)];
          for (const element of removed) {
             parts.push(bulkString(element));
@@ -657,6 +688,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          writeVersion++;
          keyVersions.set(key, writeVersion);
          propagate("lpop", args);
+         appendToAof("lpop", args);
          send(bulkString(element));
       }
    } else if (command === "lrange") {
@@ -1030,7 +1062,8 @@ const rdbPath = path.join(configDir, configDbfilename);
 loadRdb(rdbPath);
 
 // If AOF persistence is enabled, create the append-only directory and the
-// first incremental AOF file at startup.
+// first incremental AOF file at startup, and read the manifest to determine
+// the active incremental file to write to.
 if (configAppendonly === "yes") {
    const appendDir = path.join(configDir, configAppenddirname);
    fs.mkdirSync(appendDir, { recursive: true });
@@ -1038,6 +1071,16 @@ if (configAppendonly === "yes") {
    fs.writeFileSync(incrAofPath, "");
    const manifestPath = path.join(appendDir, `${configAppendfilename}.manifest`);
    fs.writeFileSync(manifestPath, `file ${configAppendfilename}.1.incr.aof seq 1 type i\n`);
+
+   // Read the manifest to find the active incremental file (type i).
+   const manifestContent = fs.readFileSync(manifestPath, "utf8");
+   for (const line of manifestContent.split("\n")) {
+      const tokens = line.trim().split(/\s+/);
+      if (tokens.length >= 6 && tokens[0] === "file" && tokens[5] === "i") {
+         activeAofPath = path.join(appendDir, tokens[1]);
+         break;
+      }
+   }
 }
 
 server.listen(port, "127.0.0.1");
