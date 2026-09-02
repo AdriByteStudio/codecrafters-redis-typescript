@@ -89,6 +89,10 @@ function propagate(command: string, args: Buffer[]): void {
 // Path to the active incremental AOF file (set at startup when AOF is enabled).
 let activeAofPath: string | null = null;
 
+// Global map of channel name -> set of subscriber sockets. Used by PUBLISH to
+// count (and later deliver to) clients subscribed to a channel.
+const channelSubscribers = new Map<string, Set<net.Socket>>();
+
 // Append a write command to the active AOF file in RESP format. When
 // appendfsync is "always", flush to disk before returning so the write is
 // durable before the client receives a response.
@@ -834,6 +838,10 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       const channel = args[0].toString();
       ctx.subscriptions.add(channel);
       ctx.subscribed = true;
+      // Register this connection as a subscriber of the channel globally.
+      const subs = channelSubscribers.get(channel) ?? new Set<net.Socket>();
+      subs.add(connection);
+      channelSubscribers.set(channel, subs);
       const count = ctx.subscriptions.size;
       const resp = Buffer.concat([
          Buffer.from(`*3\r\n`),
@@ -842,6 +850,10 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          Buffer.from(`:${count}\r\n`),
       ]);
       send(resp);
+   } else if (command === "publish") {
+      const channel = args[0].toString();
+      const subs = channelSubscribers.get(channel);
+      send(`:${subs?.size ?? 0}\r\n`);
    }
 }
 
