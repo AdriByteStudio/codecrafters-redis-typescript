@@ -225,6 +225,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
    let buffer = Buffer.alloc(0);
    let inTransaction = false;
    const queuedCommands: { command: string; args: Buffer[] }[] = [];
+   const watchedKeys = new Set<string>();
 
    // When set, command replies are collected here (used while replaying a
    // transaction's queued commands) instead of being written to the socket.
@@ -575,8 +576,14 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
             send(Buffer.concat(parts));
          }
       } else if (command === "watch") {
-         // For now, just acknowledge the command.
-         send("+OK\r\n");
+         if (inTransaction) {
+            send("-ERR WATCH inside MULTI is not allowed\r\n");
+         } else {
+            for (const arg of args) {
+               watchedKeys.add(arg.toString());
+            }
+            send("+OK\r\n");
+         }
       }
    }
 
@@ -592,7 +599,7 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          buffer = buffer.subarray(parsed.consumed);
          const command = parsed.command.toLowerCase();
 
-         if (inTransaction && command !== "multi" && command !== "exec" && command !== "discard" && command !== "watch") {
+         if (inTransaction && command !== "multi" && command !== "exec" && command !== "discard") {
             queuedCommands.push({ command, args: parsed.args });
             connection.write("+QUEUED\r\n");
             continue;
