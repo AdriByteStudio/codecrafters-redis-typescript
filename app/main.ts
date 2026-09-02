@@ -920,6 +920,31 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       });
       const rank = sorted.findIndex(([m]) => m === member);
       send(`:${rank}\r\n`);
+   } else if (command === "zrange") {
+      const key = args[0].toString();
+      const start = parseInt(args[1].toString(), 10);
+      const stop = parseInt(args[2].toString(), 10);
+      const zset = sortedSets.get(key);
+      if (!zset || start > stop) {
+         send("*0\r\n");
+         return;
+      }
+      // Sort members by score ascending, then lexicographically for ties.
+      const sorted = [...zset.entries()].sort((a, b) => {
+         if (a[1] !== b[1]) return a[1] - b[1];
+         return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+      });
+      if (start >= sorted.length) {
+         send("*0\r\n");
+         return;
+      }
+      const end = Math.min(stop, sorted.length - 1);
+      const selected = sorted.slice(start, end + 1).map(([m]) => m);
+      const parts: Buffer[] = [Buffer.from(`*${selected.length}\r\n`)];
+      for (const m of selected) {
+         parts.push(bulkString(Buffer.from(m)));
+      }
+      send(Buffer.concat(parts));
    }
 }
 
