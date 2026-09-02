@@ -254,6 +254,9 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
       } else if (command === "replconf") {
          // Used during the replication handshake. For now, just acknowledge.
          send("+OK\r\n");
+      } else if (command === "psync") {
+         // Respond with a full resynchronization using the master's replid.
+         send(`+FULLRESYNC ${masterReplid} 0\r\n`);
       } else if (command === "info") {
          // Only the replication section is needed for now.
          const section = args[0]?.toString().toLowerCase();
