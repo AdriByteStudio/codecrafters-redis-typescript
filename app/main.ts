@@ -50,6 +50,13 @@ function bulkString(value: Buffer): Buffer {
    return Buffer.concat([Buffer.from(`$${value.length}\r\n`), value, Buffer.from("\r\n")]);
 }
 
+// An empty RDB file, used for full resynchronization. Sent as
+// $<length>\r\n<binary contents> (no trailing CRLF).
+const emptyRdb = Buffer.from(
+   "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2",
+   "hex"
+);
+
 // In-memory key-value store, shared across all connections.
 // Each entry holds the value and an optional expiry timestamp (ms since epoch).
 const store = new Map<string, { value: Buffer; expiresAt: number | null }>();
@@ -255,8 +262,10 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
          // Used during the replication handshake. For now, just acknowledge.
          send("+OK\r\n");
       } else if (command === "psync") {
-         // Respond with a full resynchronization using the master's replid.
+         // Respond with a full resynchronization using the master's replid,
+         // then send the empty RDB file.
          send(`+FULLRESYNC ${masterReplid} 0\r\n`);
+         send(Buffer.concat([Buffer.from(`$${emptyRdb.length}\r\n`), emptyRdb]));
       } else if (command === "info") {
          // Only the replication section is needed for now.
          const section = args[0]?.toString().toLowerCase();
