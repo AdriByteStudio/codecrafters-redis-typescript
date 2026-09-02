@@ -715,7 +715,15 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       const sub = args[0]?.toString().toLowerCase();
       if (sub === "get") {
          const param = args[1]?.toString().toLowerCase();
-         const value = param === "dir" ? configDir : param === "dbfilename" ? configDbfilename : "";
+         const configMap: Record<string, string> = {
+            dir: configDir,
+            dbfilename: configDbfilename,
+            appendonly: "no",
+            appenddirname: "appendonlydir",
+            appendfilename: "appendonly.aof",
+            appendfsync: "everysec",
+         };
+         const value = configMap[param] ?? "";
          send(Buffer.concat([Buffer.from("*2\r\n"), bulkString(Buffer.from(param ?? "")), bulkString(Buffer.from(value))]));
       } else {
          send("*0\r\n");
