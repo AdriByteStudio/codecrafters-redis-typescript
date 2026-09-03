@@ -52,6 +52,44 @@ function bulkString(value: Buffer): Buffer {
    return Buffer.concat([Buffer.from(`$${value.length}\r\n`), value, Buffer.from("\r\n")]);
 }
 
+// Spreads a 32-bit integer to a 64-bit integer by inserting 32 zero bits
+// in-between (used by the geocoding interleave step). Uses BigInt because the
+// intermediate values exceed JavaScript's 32-bit bitwise operator range.
+function spreadInt32ToInt64(v: number): bigint {
+   let b = BigInt(v) & 0xffffffffn;
+   b = (b | (b << 16n)) & 0x0000ffff0000ffffn;
+   b = (b | (b << 8n)) & 0x00ff00ff00ff00ffn;
+   b = (b | (b << 4n)) & 0x0f0f0f0f0f0f0f0fn;
+   b = (b | (b << 2n)) & 0x3333333333333333n;
+   b = (b | (b << 1n)) & 0x5555555555555555n;
+   return b;
+}
+
+// Interleaves the bits of two 32-bit integers into a single 64-bit value.
+// x (latitude) occupies even positions, y (longitude) odd positions.
+function interleave(x: number, y: number): bigint {
+   const sx = spreadInt32ToInt64(x);
+   const sy = spreadInt32ToInt64(y);
+   return sx | (sy << 1n);
+}
+
+// Converts a longitude/latitude pair into a Redis geospatial score.
+// Follows the algorithm described in the codecrafters geocoding repo:
+// normalize to [0, 2^26), truncate, then interleave latitude and longitude bits.
+function geoScore(longitude: number, latitude: number): number {
+   const MIN_LATITUDE = -85.05112878;
+   const MAX_LATITUDE = 85.05112878;
+   const MIN_LONGITUDE = -180;
+   const MAX_LONGITUDE = 180;
+   const LATITUDE_RANGE = MAX_LATITUDE - MIN_LATITUDE;
+   const LONGITUDE_RANGE = MAX_LONGITUDE - MIN_LONGITUDE;
+
+   const normalizedLatitude = Math.trunc((2 ** 26) * ((latitude - MIN_LATITUDE) / LATITUDE_RANGE));
+   const normalizedLongitude = Math.trunc((2 ** 26) * ((longitude - MIN_LONGITUDE) / LONGITUDE_RANGE));
+
+   return Number(interleave(normalizedLatitude, normalizedLongitude));
+}
+
 // An empty RDB file, used for full resynchronization. Sent as
 // $<length>\r\n<binary contents> (no trailing CRLF).
 const emptyRdb = Buffer.from(
@@ -992,14 +1030,14 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          send(`-ERR invalid longitude,latitude pair ${longitude},${latitude}\r\n`);
          return;
       }
-      // Store the location in a sorted set. Score is hardcoded to 0 for now.
+      // Store the location in a sorted set with its geospatial score.
       let zset = sortedSets.get(key);
       if (!zset) {
          zset = new Map<string, number>();
          sortedSets.set(key, zset);
       }
       const added = zset.has(member) ? 0 : 1;
-      zset.set(member, 0);
+      zset.set(member, geoScore(longitude, latitude));
       send(`:${added}\r\n`);
    }
 }
