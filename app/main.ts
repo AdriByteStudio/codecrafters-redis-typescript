@@ -978,8 +978,10 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       send(`:${removed}\r\n`);
    } else if (command === "geoadd") {
       // GEOADD key longitude latitude member
+      const key = args[0].toString();
       const longitude = parseFloat(args[1].toString());
       const latitude = parseFloat(args[2].toString());
+      const member = args[3].toString();
       // Validate longitude: -180 to +180 inclusive.
       if (longitude < -180 || longitude > 180) {
          send(`-ERR invalid longitude,latitude pair ${longitude},${latitude}\r\n`);
@@ -990,8 +992,15 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          send(`-ERR invalid longitude,latitude pair ${longitude},${latitude}\r\n`);
          return;
       }
-      // In this stage, only respond with the count of elements added (1).
-      send(":1\r\n");
+      // Store the location in a sorted set. Score is hardcoded to 0 for now.
+      let zset = sortedSets.get(key);
+      if (!zset) {
+         zset = new Map<string, number>();
+         sortedSets.set(key, zset);
+      }
+      const added = zset.has(member) ? 0 : 1;
+      zset.set(member, 0);
+      send(`:${added}\r\n`);
    }
 }
 
