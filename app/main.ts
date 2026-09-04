@@ -1297,6 +1297,10 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          bit = (existing[byteIndex] >> bitInByte) & 1;
       }
       send(`:${bit}\r\n`);
+   } else if (command === "strlen") {
+      const key = args[0].toString();
+      const value = getValue(key);
+      send(`:${value ? value.length : 0}\r\n`);
    }
 }
 
