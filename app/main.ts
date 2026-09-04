@@ -1346,8 +1346,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       const destKey = args[1].toString();
       const sourceKeys = args.slice(2).map((a) => a.toString());
 
-      if (operation === "AND") {
-         // AND: a bit is set in the destination only when set in every source.
+      if (operation === "AND" || operation === "OR") {
          // The destination is as long as the longest source; shorter sources
          // (and missing keys) are treated as zero-padded.
          const sources = sourceKeys.map((k) => getValue(k));
@@ -1355,10 +1354,14 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
 
          const result = Buffer.alloc(length);
          for (let i = 0; i < length; i++) {
-            let byte = 0xff;
+            let byte = operation === "AND" ? 0xff : 0x00;
             for (const src of sources) {
-               // Out-of-range bytes (shorter source) are treated as 0.
-               byte &= src && i < src.length ? src[i] : 0;
+               const srcByte = src && i < src.length ? src[i] : 0;
+               if (operation === "AND") {
+                  byte &= srcByte;
+               } else {
+                  byte |= srcByte;
+               }
             }
             result[i] = byte;
          }
