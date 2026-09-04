@@ -1,6 +1,7 @@
 import * as net from "net";
 import * as fs from "fs";
 import * as path from "path";
+import * as crypto from "crypto";
 
 // You can use print statements as follows for debugging, they'll be visible when running tests.
 console.log("Logs from your program will appear here!");
@@ -237,6 +238,10 @@ const streams = new Map<string, StreamEntry[]>();
 // In-memory sorted set store, shared across all connections. Each member maps
 // to its score (stored as a 64-bit float for precision).
 const sortedSets = new Map<string, Map<string, number>>();
+
+// SHA-256 hashes of passwords associated with the default user. When a
+// password is set via ACL SETUSER, nopass is removed and the hash is added.
+const defaultUserPasswords: string[] = [];
 
 // Global write version counter and per-key version tracking. Every time any
 // key is written, writeVersion increments and that key's entry is updated.
@@ -1193,16 +1198,33 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       send(bulkString(Buffer.from("default")));
    } else if (command === "acl" && args[0]?.toString().toUpperCase() === "GETUSER") {
       // Return the properties of the specified user. The default user has
-      // the "nopass" flag set and no associated passwords.
+      // the "nopass" flag set unless a password has been configured.
+      const flags: Buffer[] = [Buffer.from(`*${defaultUserPasswords.length === 0 ? 1 : 0}\r\n`)];
+      if (defaultUserPasswords.length === 0) {
+         flags.push(bulkString(Buffer.from("nopass")));
+      }
       const parts: Buffer[] = [
          Buffer.from("*4\r\n"),
          bulkString(Buffer.from("flags")),
-         Buffer.from("*1\r\n"),
-         bulkString(Buffer.from("nopass")),
+         ...flags,
          bulkString(Buffer.from("passwords")),
-         Buffer.from("*0\r\n"),
+         Buffer.from(`*${defaultUserPasswords.length}\r\n`),
       ];
+      for (const pw of defaultUserPasswords) {
+         parts.push(bulkString(Buffer.from(pw)));
+      }
       send(Buffer.concat(parts));
+   } else if (command === "acl" && args[0]?.toString().toUpperCase() === "SETUSER") {
+      // ACL SETUSER default >password adds a password (stored as SHA-256)
+      // and removes the nopass flag.
+      const user = args[1]?.toString();
+      const rule = args[2]?.toString();
+      if (user === "default" && rule?.startsWith(">")) {
+         const password = rule.slice(1);
+         const hash = crypto.createHash("sha256").update(password).digest("hex");
+         defaultUserPasswords.push(hash);
+      }
+      send("+OK\r\n");
    }
 }
 
