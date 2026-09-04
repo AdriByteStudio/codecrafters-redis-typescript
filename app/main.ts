@@ -1144,6 +1144,50 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          const distance = haversineDistance(lon1, lat1, lon2, lat2);
          send(bulkString(Buffer.from(distance.toFixed(4))));
       }
+   } else if (command === "geosearch") {
+      const key = args[0].toString();
+      // args: key FROMLONLAT <lon> <lat> BYRADIUS <radius> <unit>
+      const centerLon = parseFloat(args[2].toString());
+      const centerLat = parseFloat(args[3].toString());
+      const radius = parseFloat(args[5].toString());
+      const unit = args[6].toString().toLowerCase();
+
+      // Convert radius to meters.
+      let radiusMeters: number;
+      switch (unit) {
+         case "m":
+            radiusMeters = radius;
+            break;
+         case "km":
+            radiusMeters = radius * 1000;
+            break;
+         case "mi":
+            radiusMeters = radius * 1609.344;
+            break;
+         case "ft":
+            radiusMeters = radius * 0.3048;
+            break;
+         default:
+            radiusMeters = radius;
+      }
+
+      const zset = sortedSets.get(key);
+      const matches: string[] = [];
+      if (zset) {
+         for (const [member, score] of zset) {
+            const [lon, lat] = decodeGeoScore(score);
+            const dist = haversineDistance(centerLon, centerLat, lon, lat);
+            if (dist <= radiusMeters) {
+               matches.push(member);
+            }
+         }
+      }
+
+      const parts: Buffer[] = [Buffer.from(`*${matches.length}\r\n`)];
+      for (const member of matches) {
+         parts.push(bulkString(Buffer.from(member)));
+      }
+      send(Buffer.concat(parts));
    }
 }
 
