@@ -1248,6 +1248,39 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       } else {
          send("-WRONGPASS invalid username-password pair or user is disabled.\r\n");
       }
+   } else if (command === "setbit") {
+      const key = args[0].toString();
+      const offset = parseInt(args[1].toString(), 10);
+      const bitValue = parseInt(args[2].toString(), 10);
+
+      // Bitmaps are stored as strings. Offset 0 is the most significant bit
+      // of the first byte.
+      const byteIndex = Math.floor(offset / 8);
+      const bitInByte = 7 - (offset % 8);
+
+      const existing = getValue(key);
+      let bytes = existing ? Buffer.from(existing) : Buffer.alloc(0);
+      if (bytes.length <= byteIndex) {
+         // Grow the buffer to fit the requested offset.
+         const grown = Buffer.alloc(byteIndex + 1);
+         bytes.copy(grown);
+         bytes = grown;
+      }
+
+      const originalBit = (bytes[byteIndex] >> bitInByte) & 1;
+
+      if (bitValue === 1) {
+         bytes[byteIndex] |= 1 << bitInByte;
+      } else {
+         bytes[byteIndex] &= ~(1 << bitInByte);
+      }
+
+      store.set(key, { value: bytes, expiresAt: null });
+      writeVersion++;
+      keyVersions.set(key, writeVersion);
+      propagate("setbit", args);
+      appendToAof("setbit", args);
+      send(`:${originalBit}\r\n`);
    }
 }
 
