@@ -121,11 +121,17 @@ function decodeGeoScore(score: number): [number, number] {
    x = (x | (x >> 16n)) & 0x00000000ffffffffn;
    y = (y | (y >> 16n)) & 0x00000000ffffffffn;
 
-   const normLat = Number(x);
-   const normLon = Number(y);
+   const gridLatNum = Number(x);
+   const gridLonNum = Number(y);
 
-   const latitude = MIN_LATITUDE + (normLat / (2 ** 26)) * LATITUDE_RANGE;
-   const longitude = MIN_LONGITUDE + (normLon / (2 ** 26)) * LONGITUDE_RANGE;
+   // Calculate the center of the grid cell (not just the edge).
+   const latMin = MIN_LATITUDE + LATITUDE_RANGE * (gridLatNum / (2 ** 26));
+   const latMax = MIN_LATITUDE + LATITUDE_RANGE * ((gridLatNum + 1) / (2 ** 26));
+   const lonMin = MIN_LONGITUDE + LONGITUDE_RANGE * (gridLonNum / (2 ** 26));
+   const lonMax = MIN_LONGITUDE + LONGITUDE_RANGE * ((gridLonNum + 1) / (2 ** 26));
+
+   const latitude = (latMin + latMax) / 2;
+   const longitude = (lonMin + lonMax) / 2;
 
    return [longitude, latitude];
 }
