@@ -90,6 +90,49 @@ function geoScore(longitude: number, latitude: number): number {
    return Number(interleave(normalizedLatitude, normalizedLongitude));
 }
 
+// Decodes a Redis geospatial score back into [longitude, latitude].
+// This is the reverse of geoScore: de-interleave the bits, then scale
+// back from normalized [0, 2^26) integers to floating-point coordinates.
+function decodeGeoScore(score: number): [number, number] {
+   const MIN_LATITUDE = -85.05112878;
+   const MAX_LATITUDE = 85.05112878;
+   const MIN_LONGITUDE = -180;
+   const MAX_LONGITUDE = 180;
+   const LATITUDE_RANGE = MAX_LATITUDE - MIN_LATITUDE;
+   const LONGITUDE_RANGE = MAX_LONGITUDE - MIN_LONGITUDE;
+
+   // De-interleave: extract even-bit positions (latitude) and odd-bit
+   // positions (longitude) from the 64-bit interleaved value.
+   const bits = BigInt(Math.round(score));
+
+   // Compact adjacent-bit pairs: move bit i to position i/2.
+   let x = bits & 0x5555555555555555n;        // even bits (lat)
+   let y = (bits >> 1n) & 0x5555555555555555n; // odd bits  (lon)
+
+   // Undo the spread transform (compact the bits together).
+   x = (x | (x >> 1n)) & 0x3333333333333333n;
+   y = (y | (y >> 1n)) & 0x3333333333333333n;
+   x = (x | (x >> 2n)) & 0x0f0f0f0f0f0f0f0fn;
+   y = (y | (y >> 2n)) & 0x0f0f0f0f0f0f0f0fn;
+   x = (x | (x >> 4n)) & 0x00ff00ff00ff00ffn;
+   y = (y | (y >> 4n)) & 0x00ff00ff00ff00ffn;
+   x = (x | (x >> 8n)) & 0x0000ffff0000ffffn;
+   y = (y | (y >> 8n)) & 0x0000ffff0000ffffn;
+   x = (x | (x >> 16n)) & 0x00000000ffffffffn;
+   y = (y | (y >> 16n)) & 0x00000000ffffffffn;
+
+   const normLat = Number(x);
+   const normLon = Number(y);
+
+   const latitude = MIN_LATITUDE + (normLat / (2 ** 26)) * LATITUDE_RANGE;
+   const longitude = MIN_LONGITUDE + (normLon / (2 ** 26)) * LONGITUDE_RANGE;
+
+   // Round to 6 decimal places for cleaner output.
+   const lon = Math.round(longitude * 1_000_000) / 1_000_000;
+   const lat = Math.round(latitude * 1_000_000) / 1_000_000;
+   return [lon, lat];
+}
+
 // An empty RDB file, used for full resynchronization. Sent as
 // $<length>\r\n<binary contents> (no trailing CRLF).
 const emptyRdb = Buffer.from(
@@ -1045,14 +1088,15 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       const zset = sortedSets.get(key);
       const parts: Buffer[] = [Buffer.from(`*${members.length}\r\n`)];
       for (const member of members) {
-         if (zset?.has(member)) {
-            // Location exists: return [longitude, latitude]. Hardcoded to 0
-            // for now (decoding comes in a later stage).
+         const score = zset?.get(member);
+         if (score !== undefined) {
+            // Location exists: decode the score back to longitude and latitude.
+            const [lon, lat] = decodeGeoScore(score);
             parts.push(
                Buffer.concat([
                   Buffer.from("*2\r\n"),
-                  bulkString(Buffer.from("0")),
-                  bulkString(Buffer.from("0")),
+                  bulkString(Buffer.from(lon.toString())),
+                  bulkString(Buffer.from(lat.toString())),
                ])
             );
          } else {
