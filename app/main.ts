@@ -1192,12 +1192,13 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       // Every new connection is authenticated as the "default" user.
       send(bulkString(Buffer.from("default")));
    } else if (command === "acl" && args[0]?.toString().toUpperCase() === "GETUSER") {
-      // Return the properties of the specified user. For now, only the
-      // "flags" property is reported, and the default user has no flags.
+      // Return the properties of the specified user. The default user has
+      // the "nopass" flag set (authentication succeeds with any password).
       const parts: Buffer[] = [
          Buffer.from("*2\r\n"),
          bulkString(Buffer.from("flags")),
-         Buffer.from("*0\r\n"),
+         Buffer.from("*1\r\n"),
+         bulkString(Buffer.from("nopass")),
       ];
       send(Buffer.concat(parts));
    }
