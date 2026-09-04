@@ -1341,6 +1341,35 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          }
       }
       send(`:${count}\r\n`);
+   } else if (command === "bitop") {
+      const operation = args[0].toString().toUpperCase();
+      const destKey = args[1].toString();
+      const sourceKeys = args.slice(2).map((a) => a.toString());
+
+      if (operation === "AND") {
+         // AND: a bit is set in the destination only when set in every source.
+         // For this stage, sources have the same length.
+         const sources = sourceKeys.map((k) => getValue(k));
+         const length = sources[0] ? sources[0].length : 0;
+
+         const result = Buffer.alloc(length);
+         for (let i = 0; i < length; i++) {
+            let byte = 0xff;
+            for (const src of sources) {
+               byte &= src ? src[i] : 0;
+            }
+            result[i] = byte;
+         }
+
+         store.set(destKey, { value: result, expiresAt: null });
+         writeVersion++;
+         keyVersions.set(destKey, writeVersion);
+         propagate("bitop", args);
+         appendToAof("bitop", args);
+         send(`:${length}\r\n`);
+      } else {
+         send("-ERR syntax error\r\n");
+      }
    }
 }
 
