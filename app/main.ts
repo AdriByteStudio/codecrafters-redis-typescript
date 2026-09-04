@@ -1039,6 +1039,28 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       const added = zset.has(member) ? 0 : 1;
       zset.set(member, geoScore(longitude, latitude));
       send(`:${added}\r\n`);
+   } else if (command === "geopos") {
+      const key = args[0].toString();
+      const members = args.slice(1).map((a) => a.toString());
+      const zset = sortedSets.get(key);
+      const parts: Buffer[] = [Buffer.from(`*${members.length}\r\n`)];
+      for (const member of members) {
+         if (zset?.has(member)) {
+            // Location exists: return [longitude, latitude]. Hardcoded to 0
+            // for now (decoding comes in a later stage).
+            parts.push(
+               Buffer.concat([
+                  Buffer.from("*2\r\n"),
+                  bulkString(Buffer.from("0")),
+                  bulkString(Buffer.from("0")),
+               ])
+            );
+         } else {
+            // Location or key doesn't exist: null array.
+            parts.push(Buffer.from("*-1\r\n"));
+         }
+      }
+      send(Buffer.concat(parts));
    }
 }
 
