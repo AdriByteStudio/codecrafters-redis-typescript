@@ -1188,6 +1188,9 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          parts.push(bulkString(Buffer.from(member)));
       }
       send(Buffer.concat(parts));
+   } else if (command === "acl" && args[0]?.toString().toUpperCase() === "WHOAMI") {
+      // Every new connection is authenticated as the "default" user.
+      send(bulkString(Buffer.from("default")));
    }
 }
 
