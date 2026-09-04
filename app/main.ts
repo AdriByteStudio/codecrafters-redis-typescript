@@ -1225,6 +1225,17 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          defaultUserPasswords.push(hash);
       }
       send("+OK\r\n");
+   } else if (command === "auth") {
+      // AUTH <username> <password>: succeed if the password's SHA-256 hash
+      // matches any hash in the user's password list.
+      const username = args[0]?.toString();
+      const password = args[1]?.toString();
+      const hash = crypto.createHash("sha256").update(password ?? "").digest("hex");
+      if (username === "default" && defaultUserPasswords.includes(hash)) {
+         send("+OK\r\n");
+      } else {
+         send("-WRONGPASS invalid username-password pair or user is disabled.\r\n");
+      }
    }
 }
 
