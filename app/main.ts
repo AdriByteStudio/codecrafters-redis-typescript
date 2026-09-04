@@ -1301,6 +1301,46 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       const key = args[0].toString();
       const value = getValue(key);
       send(`:${value ? value.length : 0}\r\n`);
+   } else if (command === "bitcount") {
+      const key = args[0].toString();
+      const value = getValue(key);
+
+      if (!value) {
+         send(":0\r\n");
+         return;
+      }
+
+      // Optional start/end byte indexes (inclusive). If omitted, count the
+      // whole string.
+      let start = 0;
+      let end = value.length - 1;
+      if (args.length >= 3) {
+         start = parseInt(args[1].toString(), 10);
+         end = parseInt(args[2].toString(), 10);
+      }
+
+      // If start is past the end, or start > end, count is 0.
+      if (start > end || start >= value.length) {
+         send(":0\r\n");
+         return;
+      }
+
+      // Clamp end to the last byte.
+      if (end >= value.length) {
+         end = value.length - 1;
+      }
+
+      let count = 0;
+      for (let i = start; i <= end; i++) {
+         const byte = value[i];
+         // Count set bits in the byte.
+         let b = byte;
+         while (b > 0) {
+            count += b & 1;
+            b >>= 1;
+         }
+      }
+      send(`:${count}\r\n`);
    }
 }
 
