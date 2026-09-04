@@ -418,6 +418,7 @@ interface ExecContext {
    responseSink: Buffer[] | null;
    subscriptions: Set<string>;
    subscribed: boolean;
+   authenticated: boolean;
 }
 
 // Executes a single command against the shared stores. `ctx.send` is used to
@@ -432,6 +433,16 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       const allowed = new Set(["subscribe", "unsubscribe", "psubscribe", "punsubscribe", "ping", "quit"]);
       if (!allowed.has(command)) {
          send(`-ERR Can't execute '${command}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context\r\n`);
+         return;
+      }
+   }
+
+   // Enforce authentication: if the connection is not authenticated, only
+   // AUTH and a few other commands are allowed.
+   if (!ctx.authenticated) {
+      const allowed = new Set(["auth", "quit", "reset"]);
+      if (!allowed.has(command)) {
+         send("-NOAUTH Authentication required.\r\n");
          return;
       }
    }
@@ -1232,6 +1243,7 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       const password = args[1]?.toString();
       const hash = crypto.createHash("sha256").update(password ?? "").digest("hex");
       if (username === "default" && defaultUserPasswords.includes(hash)) {
+         ctx.authenticated = true;
          send("+OK\r\n");
       } else {
          send("-WRONGPASS invalid username-password pair or user is disabled.\r\n");
@@ -1260,6 +1272,9 @@ const server: net.Server = net.createServer((connection: net.Socket) => {
       responseSink: null,
       subscriptions: new Set(),
       subscribed: false,
+      // New connections are authenticated as the default user only while
+      // nopass is set (i.e. no password has been configured yet).
+      authenticated: defaultUserPasswords.length === 0,
    };
 
    connection.on("data", (data: Buffer) => {
@@ -1525,6 +1540,7 @@ if (configAppendonly === "yes") {
          responseSink: null,
          subscriptions: new Set(),
          subscribed: false,
+         authenticated: true,
       };
 
       for (const aofFilePath of incrAofPaths) {
@@ -1595,6 +1611,7 @@ if (role === "slave") {
       responseSink: null,
       subscriptions: new Set(),
       subscribed: false,
+      authenticated: true,
    };
 
    // State for reading the RDB file after FULLRESYNC.
