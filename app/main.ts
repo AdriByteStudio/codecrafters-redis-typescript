@@ -1281,6 +1281,22 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
       propagate("setbit", args);
       appendToAof("setbit", args);
       send(`:${originalBit}\r\n`);
+   } else if (command === "getbit") {
+      const key = args[0].toString();
+      const offset = parseInt(args[1].toString(), 10);
+
+      // Bitmaps are stored as strings. Offset 0 is the most significant bit
+      // of the first byte. If the key doesn't exist or the offset is beyond
+      // the string length, the bit is 0.
+      const byteIndex = Math.floor(offset / 8);
+      const bitInByte = 7 - (offset % 8);
+
+      const existing = getValue(key);
+      let bit = 0;
+      if (existing && byteIndex < existing.length) {
+         bit = (existing[byteIndex] >> bitInByte) & 1;
+      }
+      send(`:${bit}\r\n`);
    }
 }
 
