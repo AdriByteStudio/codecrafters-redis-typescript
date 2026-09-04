@@ -127,10 +127,7 @@ function decodeGeoScore(score: number): [number, number] {
    const latitude = MIN_LATITUDE + (normLat / (2 ** 26)) * LATITUDE_RANGE;
    const longitude = MIN_LONGITUDE + (normLon / (2 ** 26)) * LONGITUDE_RANGE;
 
-   // Round to 6 decimal places for cleaner output.
-   const lon = Math.round(longitude * 1_000_000) / 1_000_000;
-   const lat = Math.round(latitude * 1_000_000) / 1_000_000;
-   return [lon, lat];
+   return [longitude, latitude];
 }
 
 // An empty RDB file, used for full resynchronization. Sent as
