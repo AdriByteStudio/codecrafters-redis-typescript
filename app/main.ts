@@ -136,6 +136,26 @@ function decodeGeoScore(score: number): [number, number] {
    return [longitude, latitude];
 }
 
+// Calculates the distance in meters between two (longitude, latitude) points
+// using the Haversine formula, with Earth's radius as used by Redis.
+function haversineDistance(
+   lon1: number,
+   lat1: number,
+   lon2: number,
+   lat2: number
+): number {
+   const EARTH_RADIUS = 6372797.560856;
+   const toRad = (deg: number) => (deg * Math.PI) / 180;
+
+   const dLat = toRad(lat2 - lat1);
+   const dLon = toRad(lon2 - lon1);
+   const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+   return EARTH_RADIUS * c;
+}
+
 // An empty RDB file, used for full resynchronization. Sent as
 // $<length>\r\n<binary contents> (no trailing CRLF).
 const emptyRdb = Buffer.from(
@@ -1108,6 +1128,22 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
          }
       }
       send(Buffer.concat(parts));
+   } else if (command === "geodist") {
+      const key = args[0].toString();
+      const member1 = args[1].toString();
+      const member2 = args[2].toString();
+      const zset = sortedSets.get(key);
+      const score1 = zset?.get(member1);
+      const score2 = zset?.get(member2);
+      if (score1 === undefined || score2 === undefined) {
+         // One or both members don't exist: null bulk string.
+         send("$-1\r\n");
+      } else {
+         const [lon1, lat1] = decodeGeoScore(score1);
+         const [lon2, lat2] = decodeGeoScore(score2);
+         const distance = haversineDistance(lon1, lat1, lon2, lat2);
+         send(bulkString(Buffer.from(distance.toFixed(4))));
+      }
    }
 }
 
