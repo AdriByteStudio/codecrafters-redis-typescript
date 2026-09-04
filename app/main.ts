@@ -1191,6 +1191,15 @@ function executeCommand(ctx: ExecContext, command: string, args: Buffer[]): void
    } else if (command === "acl" && args[0]?.toString().toUpperCase() === "WHOAMI") {
       // Every new connection is authenticated as the "default" user.
       send(bulkString(Buffer.from("default")));
+   } else if (command === "acl" && args[0]?.toString().toUpperCase() === "GETUSER") {
+      // Return the properties of the specified user. For now, only the
+      // "flags" property is reported, and the default user has no flags.
+      const parts: Buffer[] = [
+         Buffer.from("*2\r\n"),
+         bulkString(Buffer.from("flags")),
+         Buffer.from("*0\r\n"),
+      ];
+      send(Buffer.concat(parts));
    }
 }
 
